@@ -1,9 +1,13 @@
 import asyncio
 import time
 import logging
+import os
+import base64
+import tempfile
 from app.dependencies import call_node_rpc
 from app.dependencies import DBManager
 from app.utils import hex_to_json, convert_str_to_sha256
+from app.s3 import S3Uploader
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,6 +17,7 @@ index_height = 862600
 index_interval = 0
 mempool = []
 last_mempool = []
+s3_uploader = S3Uploader()  # 初始化S3上传器
 
 def schedule_task(task):
     """
@@ -103,8 +108,42 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
     if collection_supply <= 0:
         logging.error("Wrong Collection supply input: %s", decode_txid)
         return output_index, None
-        
+    
+    # 处理集合图标 - 上传到S3
     collection_icon = collection_tape_json.get("file", "")
+    if collection_icon and not collection_icon.startswith('http'):
+        try:
+            # 如果是Base64编码的图片数据，保存为临时文件后上传
+            if collection_icon.startswith('data:image'):
+                # 解析Base64图片数据
+                image_data = collection_icon.split(',')[1]
+                image_bytes = base64.b64decode(image_data)
+                
+                # 创建临时文件保存图片
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                    temp_file_path = temp_file.name
+                    temp_file.write(image_bytes)
+                
+                # 上传到S3
+                object_name = f"collections/{collection_id}.jpg"
+                success, _ = s3_uploader.upload_image(
+                    file_path=temp_file_path,
+                    object_name=object_name,
+                    content_type='image/jpeg'
+                )
+                
+                # 删除临时文件
+                os.unlink(temp_file_path)
+                
+                if success:
+                    # 获取公共URL
+                    collection_icon = s3_uploader.get_public_url(object_name=object_name)
+                    logging.info("Collection icon uploaded to S3: %s", collection_icon)
+            else:
+                logging.warning("Unknown image format for collection %s", decode_txid)
+        except Exception as e:
+            logging.error("Error uploading collection icon to S3: %s", str(e))
+            # 如果上传失败，保留原始数据
 
     # 插入记录到 nft_collections 表
     nft_collection_insert_query = """
@@ -250,9 +289,48 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
         nft_transfer_time_count = 0
         nft_create_timestamp = timestamp
         nft_last_transfer_timestamp = timestamp
+        
+        # 处理NFT图标 - 上传到S3
         nft_icon = nft_tape_json.get("file", "")
-        if len(nft_icon) == 72:
-            nft_icon = collection_icon
+        if nft_icon and not nft_icon.startswith('http'):
+            # 如果file是64+8长度的格式，保留原值
+            if len(nft_icon) == 72:
+                nft_icon = collection_icon
+            # 否则尝试作为图片数据处理并上传到S3
+            elif not nft_icon.startswith('http'):
+                try:
+                    # 如果是Base64编码的图片数据，保存为临时文件后上传
+                    if nft_icon.startswith('data:image'):
+                        # 解析Base64图片数据
+                        image_data = nft_icon.split(',')[1]
+                        image_bytes = base64.b64decode(image_data)
+                        
+                        # 创建临时文件保存图片
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                            temp_file_path = temp_file.name
+                            temp_file.write(image_bytes)
+                        
+                        # 上传到S3
+                        object_name = f"nfts/{nft_contract_id}.jpg"
+                        success, _ = s3_uploader.upload_image(
+                            file_path=temp_file_path,
+                            object_name=object_name,
+                            content_type='image/jpeg'
+                        )
+                        
+                        # 删除临时文件
+                        os.unlink(temp_file_path)
+                        
+                        if success:
+                            # 获取公共URL
+                            nft_icon = s3_uploader.get_public_url(object_name=object_name)
+                            logging.info("NFT icon uploaded to S3: %s", nft_icon)
+                    else:
+                        logging.warning("Unknown image format for NFT %s", decode_txid)
+                except Exception as e:
+                    logging.error("Error uploading NFT icon to S3: %s", str(e))
+                    # 如果上传失败，保留原始数据
+        
         nft_utxo_set_insert_query = """
         INSERT INTO nft_utxo_set (nft_contract_id, collection_id, collection_index, collection_name, nft_utxo_id, nft_code_balance, nft_p2pkh_balance, nft_name, nft_symbol, nft_attributes, nft_description, nft_transfer_time_count, nft_holder_address, nft_holder_script_hash, nft_create_timestamp, nft_last_transfer_timestamp, nft_icon)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
@@ -543,11 +621,11 @@ async def scan_chain_and_build_index():
             # 处理各种类型的UTXO
             if decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("0 OP_RETURN") or decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("OP_RETURN"):
                 # 处理NFT集合
-                new_output_index, collection_id = await process_nft_collections(decode_tx, output_index, timestamp)
+                new_output_index, _ = await process_nft_collections(decode_tx, output_index, timestamp)
                 output_index = new_output_index
             elif decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("1 OP_PICK 3 OP_SPLIT") or decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("4 OP_PICK OP_BIN2NUM OP_TOALTSTACK 1 OP_PICK 3 OP_SPLIT"):
                 # 处理NFT
-                new_output_index, nft_contract_id = await process_nft_utxo_set(decode_tx, output_index, timestamp)
+                new_output_index, _ = await process_nft_utxo_set(decode_tx, output_index, timestamp)
                 output_index = new_output_index
             elif decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("9 OP_PICK OP_TOALTSTACK"):
                 # 处理FT代币
