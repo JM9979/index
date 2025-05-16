@@ -2,7 +2,7 @@ import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 import logging
 from urllib.parse import urlparse
-from app.config import config
+from config import config
 
 class S3Uploader:
     def __init__(self, aws_access_key_id=None, aws_secret_access_key=None, region_name=None):
@@ -154,10 +154,10 @@ class S3Uploader:
 # if __name__ == "__main__":
 #     # 配置日志
 #     logging.basicConfig(level=logging.INFO)
-#     
+    
 #     # 初始化上传器（不需要传入参数，将使用config.py中的配置）
 #     uploader = S3Uploader()
-#     
+    
 #     # 上传图片
 #     success, object_key = uploader.upload_image(
 #         file_path='/workspaces/TBC-API/index/image.jpg',
@@ -167,16 +167,16 @@ class S3Uploader:
 #         metadata={'author': 'your-name', 'description': 'sample image'},
 #         tags={'category': 'photos', 'project': 'demo'}
 #     )
-#     
+    
 #     if success:
 #         print(f"图片上传成功，对象键: {object_key}")
-#         
+        
 #         # 获取预签名URL（适用于私有对象）
-#         presigned_url = uploader.get_object_url(object_key=object_key)
+#         presigned_url = uploader.get_object_url(object_name=object_key)
 #         print(f"预签名URL（1小时内有效）: {presigned_url}")
-#         
+        
 #         # 获取公共URL（如果ACL设置为public-read）
-#         public_url = uploader.get_public_url(object_key=object_key)
+#         public_url = uploader.get_public_url(object_name=object_key)
 #         print(f"公共访问URL: {public_url}")
 #     else:
 #         print(f"上传失败: {object_key}")  # 这里object_key实际上是错误信息
