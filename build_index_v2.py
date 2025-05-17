@@ -35,8 +35,16 @@ def upload_base64_image_to_s3(image_data, object_name, content_type='image/jpeg'
     """
     if not image_data.startswith('data:image'):
         return False, image_data
-        
+    
     try:
+        # 先检查S3上是否已经存在该对象
+        if s3_uploader.check_object_exists(object_name):
+            # 对象已存在，直接获取URL
+            image_url = s3_uploader.get_public_url(object_name=object_name)
+            logging.info("Image already exists in S3, reusing: %s", image_url)
+            return True, image_url
+            
+        # 如果不存在，则进行上传
         # 解析Base64图片数据
         image_data_encoded = image_data.split(',')[1]
         image_bytes = base64.b64decode(image_data_encoded)
