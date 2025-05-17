@@ -20,6 +20,34 @@ class S3Uploader:
         )
         self.logger = logging.getLogger(__name__)
 
+    def check_object_exists(self, object_name, bucket_name=None):
+        """
+        检查S3上是否已经存在指定对象
+        :param object_name: 对象键名称
+        :param bucket_name: 桶名称，如果未指定则使用默认桶
+        :return: 如果对象存在返回True，否则返回False
+        """
+        try:
+            # 如果没有指定bucket_name，则使用配置中的默认值
+            if bucket_name is None:
+                bucket_name = config.S3_BUCKET_NAME
+            
+            # 尝试获取对象的元数据，如果成功则说明对象存在
+            self.s3_client.head_object(Bucket=bucket_name, Key=object_name)
+            self.logger.info(f"对象已存在: {bucket_name}/{object_name}")
+            return True
+        except ClientError as e:
+            # 如果对象不存在，会抛出404错误
+            if e.response['Error']['Code'] == '404':
+                self.logger.info(f"对象不存在: {bucket_name}/{object_name}")
+                return False
+            else:
+                self.logger.error(f"检查对象时出错: {e.response['Error']['Message']}")
+                return False
+        except Exception as e:
+            self.logger.error(f"检查对象时发生未知错误: {str(e)}")
+            return False
+            
     def upload_image(self, bucket_name=None, file_path=None, object_name=None, content_type='image/jpeg', 
                     acl='private', storage_class='STANDARD', metadata=None, tags=None):
         """
