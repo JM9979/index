@@ -625,7 +625,7 @@ async def process_single_transaction(conn, tx, block_height, timestamp):
         tx_analysis = await analyze_transaction_data(decode_tx)
         
         # 处理交易历史记录
-        await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+        await process_transaction_record(conn, decode_tx, block_height, timestamp, tx_analysis['tx_type'])
 
         # 处理代币相关UTXO
         await process_tx_utxos(conn, decode_tx, timestamp, tx_analysis['utxo_types'])
@@ -646,7 +646,7 @@ def is_in_blacklist(txid):
         return False
 
 
-async def process_transaction_record(decode_tx, block_height, timestamp, tx_type=None):
+async def process_transaction_record(conn, decode_tx, block_height, timestamp, tx_type=None):
     """
     处理交易历史记录并更新相关表
     
@@ -726,7 +726,7 @@ async def process_transaction_record(decode_tx, block_height, timestamp, tx_type
     utc_time = "unconfirmed" if block_height < 1 else datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     
     # 更新数据库
-    await update_transaction_tables(decode_txid, fee_str, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers)
+    await update_transaction_tables(conn, decode_txid, fee_str, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers)
 
 
 def determine_tx_type(decode_tx):
@@ -758,7 +758,7 @@ def determine_tx_type(decode_tx):
     return tx_type
 
 
-async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers):
+async def update_transaction_tables(conn, tx_hash, fee, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers):
     """
     更新交易相关数据表
     
@@ -785,7 +785,7 @@ async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, 
         block_height = new.block_height,
         updated_at = CURRENT_TIMESTAMP
     """
-    await DBManager.execute_update(transactions_insert_query, (
+    await DBManager.execute_update_nocommit(conn, transactions_insert_query, (
         tx_hash, fee, timestamp, utc_time, tx_type, block_height
     ))
     
@@ -809,24 +809,24 @@ async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, 
             balance_change = new.balance_change,
             updated_at = CURRENT_TIMESTAMP
         """
-        await DBManager.execute_update(address_tx_insert_query, (
+        await DBManager.execute_update_nocommit(conn, address_tx_insert_query, (
             address, tx_hash, is_sender, is_recipient, formatted_balance
         ))
     
     # 3. 处理交易参与方
     # 清除旧记录
-    await DBManager.execute_update("DELETE FROM transaction_participants WHERE tx_hash = %s", (tx_hash,))
+    await DBManager.execute_update_nocommit(conn, "DELETE FROM transaction_participants WHERE tx_hash = %s", (tx_hash,))
     
     # 插入发送方
     for sender in senders:
-        await DBManager.execute_update(
+        await DBManager.execute_update_nocommit(conn,
             "INSERT INTO transaction_participants (tx_hash, address, role) VALUES (%s, %s, %s)",
             (tx_hash, sender, "sender")
         )
     
     # 插入接收方
     for receiver in receivers:
-        await DBManager.execute_update(
+        await DBManager.execute_update_nocommit(conn,
             "INSERT INTO transaction_participants (tx_hash, address, role) VALUES (%s, %s, %s)",
             (tx_hash, receiver, "recipient")
         )
