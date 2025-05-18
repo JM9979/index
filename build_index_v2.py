@@ -654,9 +654,6 @@ async def process_single_transaction(tx, block_height, timestamp):
         # 分析交易数据，获取交易类型和UTXO类型
         tx_analysis = await analyze_transaction_data(decode_tx)
         
-        # 处理交易历史记录
-        await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
-        
         # 处理代币相关UTXO
         await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
         
