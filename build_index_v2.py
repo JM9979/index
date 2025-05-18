@@ -970,6 +970,7 @@ async def process_transactions(conn, new_txs, if_catch_lastest, timestamp):
         success = await process_single_transaction(conn, tx, block_height, timestamp)
         if not success:
             raise Exception(f"处理交易 {tx} 失败")
+    logging.info("处理新交易完成, 新交易数量: %s", len(new_txs))
 
 
 def update_mempool_state(if_catch_lastest):
@@ -987,6 +988,7 @@ def update_mempool_state(if_catch_lastest):
         index_height += 1
         last_mempool = mempool
         mempool = []
+    logging.info("update_mempool_state: %s||%s||%s", index_height, mempool, last_mempool)
 
 # 该方法在处理完毕某一height的tx后调用；所以，如果当前没有追赶到最新状态，在保存时需要把height + 1
 async def save_build_status(conn, height, tx_pool, last_tx_pool):
@@ -1037,9 +1039,10 @@ async def scan_chain_and_build_index():
         
         # 获取当前内存池和时间戳
         current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
-        
         # 找出新交易
         new_txs = find_new_transactions(current_mempool)
+        logging.info("current_mempool: %s||mempool: %s||last_mempool: %s", current_mempool, mempool, last_mempool)
+        logging.info("new_txs: %s", new_txs)
         async with DBManager._pool.acquire() as conn:
             await conn.begin()
             try:
@@ -1056,6 +1059,7 @@ async def scan_chain_and_build_index():
                 raise e
             else:
                 await conn.commit()
+                logging.info("构建高度: %s 构建成功", index_height)
         
         return True
     except Exception as e:
