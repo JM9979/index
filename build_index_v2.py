@@ -637,7 +637,7 @@ async def process_single_transaction(conn, tx, block_height, timestamp):
         
         return True
     except Exception as e:
-        logging.error("处理交易 %s 时出错: %s", tx, str(e))
+        logging.error("处理交易 %s 时出错:", tx, exc_info=True)
         return False
 
 
@@ -967,7 +967,9 @@ async def process_transactions(conn, new_txs, if_catch_lastest, timestamp):
     for tx in new_txs:
         mempool.append(tx)
         block_height = index_height if not if_catch_lastest else -1
-        await process_single_transaction(conn, tx, block_height, timestamp)
+        success = await process_single_transaction(conn, tx, block_height, timestamp)
+        if not success:
+            raise Exception(f"处理交易 {tx} 失败")
 
 
 def update_mempool_state(if_catch_lastest):
@@ -1050,6 +1052,7 @@ async def scan_chain_and_build_index():
                 await save_build_status(conn, index_height, mempool, last_mempool)
             except Exception as e:
                 await conn.rollback()
+                logging.error("构建高度: %s 发生回滚, 错误信息: %s", index_height, str(e))
                 raise e
             else:
                 await conn.commit()
