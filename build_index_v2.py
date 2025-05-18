@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import logging
 import os
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+first_index_height = 862600
 # 定义并初始化全局变量
 index_height = 862600
 index_interval = 0
@@ -77,38 +79,6 @@ def upload_base64_image_to_s3(image_data, object_name, content_type='image/jpeg'
         logging.error("Error uploading image to S3: %s", str(e))
         return False, image_data
 
-def schedule_task(task):
-    """
-    Schedule task.
-    """
-    async def wrapper():
-        await DBManager.init_pool(db="TBC20721")
-
-        # clear db
-        clear_db_query = """
-        SET FOREIGN_KEY_CHECKS = 0;
-        TRUNCATE TABLE `ft_tokens`;
-        TRUNCATE TABLE `ft_balance`;
-        TRUNCATE TABLE `ft_txo_set`;
-        TRUNCATE TABLE `nft_collections`;
-        TRUNCATE TABLE `nft_utxo_set`;
-        SET FOREIGN_KEY_CHECKS = 1;
-        """
-        await DBManager.execute_update(clear_db_query)
-
-        while True:
-            try:
-                global index_interval
-                await task()
-                await asyncio.sleep(index_interval)
-            except KeyboardInterrupt:
-                logging.info("Interrupted by user")
-                break
-            
-        await DBManager.close_pool()
-    asyncio.run(wrapper())
-
-
 async def syclic_call_rpc(method, params):
     """
     Syclic call RPC.
@@ -123,7 +93,7 @@ async def syclic_call_rpc(method, params):
             await asyncio.sleep(retry_interval)
 
 
-async def process_nft_collections(decode_tx, output_index, timestamp):
+async def process_nft_collections(conn, decode_tx, output_index, timestamp):
     """处理NFT集合信息并更新nft_collections表"""
     decode_txid = decode_tx["txid"]
     
@@ -135,10 +105,10 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
 
     if len(decode_tx["vout"]) - output_index <= 1:
         logging.error("Error Collection Protocal: %s", decode_txid)
-        return output_index, None
+        return output_index + 1, None
     if decode_tx["vout"][output_index + 1]["scriptPubKey"]["type"] != "pubkeyhash":
         logging.error("Error Collection Protocal: %s", decode_txid)
-        return output_index, None
+        return output_index + 1, None
 
     # 准备集合插入数据
     collection_id = decode_txid
@@ -155,7 +125,7 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
         collection_tape_json = hex_to_json(collection_tape_hex)
     except ValueError:
         logging.error("Error decoding Collection tape %s", decode_txid)
-        return output_index, None
+        return output_index + 1, None
         
     collection_name = collection_tape_json.get("collectionName", "")
     collection_symbol = collection_tape_json.get("symbol", "")
@@ -165,7 +135,7 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
     
     if collection_supply <= 0:
         logging.error("Wrong Collection supply input: %s", decode_txid)
-        return output_index, None
+        return output_index + 1, None
     
     # 处理集合图标 - 上传到S3
     collection_icon = collection_tape_json.get("file", "")
@@ -197,14 +167,14 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
     """
     
     try:
-        await DBManager.execute_update(nft_collection_insert_query, (collection_id, collection_name, collection_creator_address, collection_creator_script_hash, collection_symbol, collection_attributes, collection_description, collection_supply, collection_create_timestamp, collection_icon))
+        await DBManager.execute_update_nocommit(conn, nft_collection_insert_query, (collection_id, collection_name, collection_creator_address, collection_creator_script_hash, collection_symbol, collection_attributes, collection_description, collection_supply, collection_create_timestamp, collection_icon))
         return output_index + collection_supply, collection_id
     except Exception as e:
         logging.error("Error inserting collection %s: %s", decode_txid, e)
-        return output_index, None
+        return output_index + 1, None
 
 
-async def process_nft_utxo_set(decode_tx, output_index, timestamp):
+async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
     """处理NFT信息并更新nft_utxo_set表"""
     decode_txid = decode_tx["txid"]
     
@@ -219,7 +189,7 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
 
         if len(decode_tx["vout"]) - output_index <= 2:
             logging.error("Error NFT Protocal: %s", decode_txid)
-            return output_index, None
+            return output_index + 1, None
 
         # 解码 tape json
         if decode_tx['vout'][output_index + 2]['scriptPubKey']['asm'].startswith("0 OP_RETURN"):
@@ -228,7 +198,7 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
             nft_tape_hex = decode_tx['vout'][output_index + 2]['scriptPubKey']['asm'][10:-10]
         else:
             logging.error("Error decoding nft scriptPubKey asm %s", decode_txid)
-            return output_index, None
+            return output_index + 1, None
         
         try:
             nft_tape_json = hex_to_json(nft_tape_hex)
@@ -243,7 +213,7 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
         
         if len(decode_tx["vout"]) - output_index <= 1:
             logging.error("Error Pool NFT Protocal: %s", decode_txid)
-            return output_index, None
+            return output_index + 1, None
             
         nft_tape_hex = "POOLNFT"
         pool_tape_list = decode_tx["vout"][output_index + 1]["scriptPubKey"]["asm"].split(" ")
@@ -253,7 +223,7 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
         
     else:
         logging.error("Error decoding nft scriptPubKey asm %s", decode_txid)
-        return output_index, None
+        return output_index + 1, None
     
     # 准备 NFT 插入数据
     nft_code_balance = round(decode_tx["vout"][output_index]["value"] * 1_000_000)
@@ -277,12 +247,12 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
                 nft_contract_id = nft_contract_id_res[0][0]
             else:
                 logging.error("Can not find which NFT the first input belong %s", decode_txid)
-                return output_index, None
+                return output_index + 1, None
         else:
             nft_file = nft_tape_json.get("file", "")
             if len(nft_file) != 72:
                 logging.error("Error NFT Transfer Tape file: %s", decode_txid)
-                return output_index, None
+                return output_index + 1, None
             nft_contract_id = nft_file[:64]
 
         nft_update_query = """
@@ -290,7 +260,7 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
         SET nft_utxo_id = %s, nft_code_balance = %s, nft_p2pkh_balance = %s, nft_holder_address = %s, nft_holder_script_hash = %s, nft_last_transfer_timestamp = %s, nft_transfer_time_count = nft_transfer_time_count + 1
         WHERE nft_contract_id = %s
         """
-        await DBManager.execute_update(nft_update_query, (decode_txid, nft_code_balance, nft_p2pkh_balance, nft_holder_address, nft_holder_script_hash, timestamp, nft_contract_id))
+        await DBManager.execute_update_nocommit(conn, nft_update_query, (decode_txid, nft_code_balance, nft_p2pkh_balance, nft_holder_address, nft_holder_script_hash, timestamp, nft_contract_id))
     else:
         logging.info("NFT Mint:               %s", decode_txid)
         
@@ -366,25 +336,25 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
             nft_last_transfer_timestamp = new.nft_last_transfer_timestamp,
             nft_icon = new.nft_icon
         """
-        await DBManager.execute_update(nft_utxo_set_insert_query, (nft_contract_id, collection_id, collection_index, collection_name, nft_utxo_id, nft_code_balance, nft_p2pkh_balance, nft_name, nft_symbol, nft_attributes, nft_description, nft_transfer_time_count, nft_holder_address, nft_holder_script_hash, nft_create_timestamp, nft_last_transfer_timestamp, nft_icon))
+        await DBManager.execute_update_nocommit(conn, nft_utxo_set_insert_query, (nft_contract_id, collection_id, collection_index, collection_name, nft_utxo_id, nft_code_balance, nft_p2pkh_balance, nft_name, nft_symbol, nft_attributes, nft_description, nft_transfer_time_count, nft_holder_address, nft_holder_script_hash, nft_create_timestamp, nft_last_transfer_timestamp, nft_icon))
     
     return output_index + nft_offset, nft_contract_id
 
 
-async def process_ft_tokens(decode_tx, output_index, timestamp):
+async def process_ft_tokens(conn, decode_tx, output_index, timestamp):
     """处理同质化代币信息并更新ft_tokens表"""
     decode_txid = decode_tx["txid"]
     
     if not decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("9 OP_PICK OP_TOALTSTACK"):
-        return output_index, None, None, None
+        return output_index + 1, None, None, None
     
     if len(decode_tx["vout"]) - output_index <= 1:
         logging.error("Error FT Protocal: %s", decode_txid)
-        return output_index, None, None, None
+        return output_index + 1, None, None, None
 
     # 排除错误版本的 TBC20
     if decode_tx["vout"][output_index]["scriptPubKey"]["asm"][-32:-11] == "OP_CHECKSIG OP_RETURN":
-        return output_index, None, None, None
+        return output_index + 1, None, None, None
     
     vout_combine_script = decode_tx["vout"][output_index]["scriptPubKey"]["hex"][-54:-12]
     ft_balance = 0
@@ -458,12 +428,12 @@ async def process_ft_tokens(decode_tx, output_index, timestamp):
             ft_create_timestamp = new.ft_create_timestamp,
             ft_token_price = new.ft_token_price
         """
-        await DBManager.execute_update(ft_token_insert_query, (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price))
+        await DBManager.execute_update_nocommit(conn, ft_token_insert_query, (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price))
         
     return output_index + 2, ft_contract_id, vout_combine_script, ft_balance
 
 
-async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance):
+async def process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance):
     """处理同质化代币UTXO并更新ft_txo_set表"""
     decode_txid = decode_tx["txid"]
     
@@ -484,7 +454,7 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
         ft_balance = new.ft_balance,
         if_spend = new.if_spend
     """
-    await DBManager.execute_update(ft_utxo_set_insert_query, (decode_txid, output_index - 2, vout_combine_script, ft_contract_id, vout_utxo_balance, ft_balance, if_spend))
+    await DBManager.execute_update_nocommit(conn, ft_utxo_set_insert_query, (decode_txid, output_index - 2, vout_combine_script, ft_contract_id, vout_utxo_balance, ft_balance, if_spend))
     
     # 更新已花费的 UTXO
     for vin in decode_tx["vin"]:
@@ -502,7 +472,7 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
                 SET if_spend = 1
                 WHERE utxo_txid = %s AND utxo_vout = %s
                 """
-                await DBManager.execute_update(ft_utxo_update_query, (vin["txid"], vin["vout"]))
+                await DBManager.execute_update_nocommit(conn, ft_utxo_update_query, (vin["txid"], vin["vout"]))
                 
                 # 返回已花费的UTXO信息，供ft_balance处理函数使用
                 return ft_txo_query_res[0]
@@ -510,7 +480,7 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
     return None
 
 
-async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info=None):
+async def process_ft_balance(conn, ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info=None):
     """处理同质化代币余额并更新ft_balance表"""
     if ft_contract_id is None:
         return
@@ -526,7 +496,7 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, sp
         INSERT INTO ft_balance (ft_holder_combine_script, ft_contract_id, ft_balance)
         VALUES (%s, %s, %s)
         """
-        await DBManager.execute_update(ft_balance_insert_query, (vout_combine_script, ft_contract_id, ft_balance))
+        await DBManager.execute_update_nocommit(conn, ft_balance_insert_query, (vout_combine_script, ft_contract_id, ft_balance))
 
         # ft_holders_count 增加
         ft_tokens_update = """
@@ -534,14 +504,14 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, sp
         SET ft_holders_count = ft_holders_count + 1
         WHERE ft_contract_id = %s
         """
-        await DBManager.execute_update(ft_tokens_update, (ft_contract_id,))
+        await DBManager.execute_update_nocommit(conn, ft_tokens_update, (ft_contract_id,))
     else:
         ft_balance_update_query = """
         UPDATE ft_balance
         SET ft_balance = ft_balance + %s
         WHERE ft_holder_combine_script = %s and ft_contract_id = %s
         """
-        await DBManager.execute_update(ft_balance_update_query, (ft_balance, vout_combine_script, ft_contract_id))
+        await DBManager.execute_update_nocommit(conn, ft_balance_update_query, (ft_balance, vout_combine_script, ft_contract_id))
     
     # 处理已花费的UTXO对应的余额
     if spent_utxo_info:
@@ -563,14 +533,14 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, sp
                 WHERE ft_holder_combine_script = %s 
                 AND ft_contract_id = %s 
                 """
-                await DBManager.execute_update(ft_balance_delete_query, (spent_holder_script, spent_ft_contract_id))
+                await DBManager.execute_update_nocommit(conn, ft_balance_delete_query, (spent_holder_script, spent_ft_contract_id))
                 
                 ft_tokens_update = """
                 UPDATE ft_tokens
                 SET ft_holders_count = ft_holders_count - 1
                 WHERE ft_contract_id = %s
                 """
-                await DBManager.execute_update(ft_tokens_update, (spent_ft_contract_id,))
+                await DBManager.execute_update_nocommit(conn, ft_tokens_update, (spent_ft_contract_id,))
             elif ft_balance_balance > spent_ft_balance:
                 ft_balance_update_query = """
                 UPDATE ft_balance
@@ -578,7 +548,7 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, sp
                 WHERE ft_holder_combine_script = %s 
                 AND ft_contract_id = %s 
                 """                            
-                await DBManager.execute_update(ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
+                await DBManager.execute_update_nocommit(conn, ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
 
 
 async def analyze_transaction_data(decode_tx):
@@ -630,7 +600,7 @@ async def analyze_transaction_data(decode_tx):
     return result
 
 
-async def process_single_transaction(tx, block_height, timestamp):
+async def process_single_transaction(conn, tx, block_height, timestamp):
     """
     处理单个交易，包括交易历史记录和代币操作
     
@@ -655,7 +625,7 @@ async def process_single_transaction(tx, block_height, timestamp):
         tx_analysis = await analyze_transaction_data(decode_tx)
         
         # 处理代币相关UTXO
-        await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
+        await process_tx_utxos(conn, decode_tx, timestamp, tx_analysis['utxo_types'])
         
         return True
     except Exception as e:
@@ -859,7 +829,7 @@ async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, 
         )
 
 
-async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
+async def process_tx_utxos(conn, decode_tx, timestamp, utxo_types=None):
     """
     处理交易中的各种UTXO（FT/NFT等）
     
@@ -891,20 +861,20 @@ async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
         
         # 根据UTXO类型处理
         if utxo_type == 'NFT_COLLECTION':
-            new_output_index, _ = await process_nft_collections(decode_tx, output_index, timestamp)
+            new_output_index, _ = await process_nft_collections(conn, decode_tx, output_index, timestamp)
             output_index = new_output_index
         elif utxo_type == 'NFT':
-            new_output_index, _ = await process_nft_utxo_set(decode_tx, output_index, timestamp)
+            new_output_index, _ = await process_nft_utxo_set(conn, decode_tx, output_index, timestamp)
             output_index = new_output_index
         elif utxo_type == 'FT':
-            new_output_index, ft_contract_id, vout_combine_script, ft_balance = await process_ft_tokens(decode_tx, output_index, timestamp)
+            new_output_index, ft_contract_id, vout_combine_script, ft_balance = await process_ft_tokens(conn, decode_tx, output_index, timestamp)
             output_index = new_output_index
             
             # 处理FT代币的UTXO集合
-            spent_utxo_info = await process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
+            spent_utxo_info = await process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
             
             # 处理FT代币余额
-            await process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info)
+            await process_ft_balance(conn, ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info)
         else:
             output_index += 1
 
@@ -974,7 +944,7 @@ def find_new_transactions(current_mempool):
     return new_txs
 
 
-async def process_transactions(new_txs, if_catch_lastest, timestamp):
+async def process_transactions(conn, new_txs, if_catch_lastest, timestamp):
     """
     处理新交易
     
@@ -989,7 +959,7 @@ async def process_transactions(new_txs, if_catch_lastest, timestamp):
     for tx in new_txs:
         mempool.append(tx)
         block_height = index_height if not if_catch_lastest else -1
-        await process_single_transaction(tx, block_height, timestamp)
+        await process_single_transaction(conn, tx, block_height, timestamp)
 
 
 def update_mempool_state(if_catch_lastest):
@@ -1008,6 +978,44 @@ def update_mempool_state(if_catch_lastest):
         last_mempool = mempool
         mempool = []
 
+# 该方法在处理完毕某一height的tx后调用；所以，如果当前没有追赶到最新状态，在保存时需要把height + 1
+async def save_build_status(conn, height, tx_pool, last_tx_pool):
+    """保存构建状态"""
+    sql = """
+    UPDATE t_index_build_status 
+    SET value = %s
+    WHERE name = %s
+    """
+    tx_pool_json = json.dumps(tx_pool)
+    last_tx_pool_json = json.dumps(last_tx_pool)
+    await DBManager.execute_update_nocommit(conn, sql, (height, "index_height"))
+    await DBManager.execute_update_nocommit(conn, sql, (tx_pool_json, "mempool"))
+    await DBManager.execute_update_nocommit(conn, sql, (last_tx_pool_json, "last_mempool"))
+
+    return
+
+async def load_build_status() -> tuple[int, list[str], list[str]]:
+    """加载构建状态"""
+    sql = """
+    SELECT value FROM t_index_build_status WHERE name = %s
+    """
+    index_height_res = await DBManager.execute_query(sql, ("index_height",))
+    if index_height_res[0][0] < first_index_height:
+        raise Exception("数据库存储的构建状态异常, 数据库中索引高度为 %s", index_height_res[0][0])
+    mempool_res = await DBManager.execute_query(sql, ("mempool",))
+    last_mempool_res = await DBManager.execute_query(sql, ("last_mempool",))
+    return index_height_res[0][0], json.loads(mempool_res[0][0]), json.loads(last_mempool_res[0][0])
+
+async def reset_build_status(conn):
+    """重置构建状态"""
+    sql = """
+    UPDATE t_index_build_status 
+    SET value = %s
+    WHERE name = %s
+    """
+    await DBManager.execute_update_nocommit(conn, sql, (json.dumps([]), "mempool"))
+    await DBManager.execute_update_nocommit(conn, sql, (json.dumps([]), "last_mempool"))
+    await DBManager.execute_update_nocommit(conn, sql, (first_index_height, "index_height"))
 
 async def scan_chain_and_build_index():
     """
@@ -1022,17 +1030,77 @@ async def scan_chain_and_build_index():
         
         # 找出新交易
         new_txs = find_new_transactions(current_mempool)
-        
-        # 处理新交易
-        await process_transactions(new_txs, if_catch_lastest, timestamp)
-        
-        # 更新内存池状态
-        update_mempool_state(if_catch_lastest)
+        async with DBManager._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                # 处理新交易
+                await process_transactions(conn, new_txs, if_catch_lastest, timestamp)
+                
+                # 更新内存池状态
+                update_mempool_state(if_catch_lastest)
+
+                await save_build_status(conn, index_height, mempool, last_mempool)
+            except Exception as e:
+                await conn.rollback()
+                raise e
+            else:
+                await conn.commit()
         
         return True
     except Exception as e:
-        logging.error("扫描区块链出错: %s", str(e))
+        logging.error("P0 扫描区块链出错: %s", str(e))
         return False
+
+async def clear_db():
+    """
+    清空数据库
+    """
+    clear_db_query = """
+    SET FOREIGN_KEY_CHECKS = 0;
+    TRUNCATE TABLE `ft_tokens`;
+    TRUNCATE TABLE `ft_balance`;
+    TRUNCATE TABLE `ft_txo_set`;
+    TRUNCATE TABLE `nft_collections`;
+    TRUNCATE TABLE `nft_utxo_set`;
+    SET FOREIGN_KEY_CHECKS = 1;
+    """
+    async with DBManager._pool.acquire() as conn:
+        await DBManager.execute_update_nocommit(conn, clear_db_query)
+        await reset_build_status(conn) # 重置构建状态
+        await conn.commit()
+
+def schedule_task(task, clear_db=False):
+    """
+    Schedule task.
+    """
+    async def wrapper():
+        await DBManager.init_pool(db="TBC20721")
+
+        if clear_db:
+            await clear_db()
+            logging.info("清空数据库成功，开始从头构建索引")
+        else:
+            global index_height
+            global mempool
+            global last_mempool
+            index_height, mempool, last_mempool = await load_build_status() # 加载构建状态
+            logging.info("加载构建状态成功, 从索引高度为 %s 开始构建, mempool 长度为 %s, last_mempool 长度为 %s", index_height, len(mempool), len(last_mempool))
+
+        while True:
+            try:
+                global index_interval
+                await task()
+                await asyncio.sleep(index_interval)
+            except KeyboardInterrupt:
+                logging.info("Interrupted by user")
+                break
+            except Exception as e:
+                logging.error("P0 Uncatched Error: %s", str(e))
+                await asyncio.sleep(10)
+            
+        await DBManager.close_pool()
+    asyncio.run(wrapper())
+
 
 
 if __name__ == "__main__":

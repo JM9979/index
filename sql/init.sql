@@ -89,5 +89,16 @@ CREATE TABLE IF NOT EXISTS `ft_balance` (
   CONSTRAINT `fk_balance_contract` FOREIGN KEY (`ft_contract_id`) REFERENCES `ft_tokens` (`ft_contract_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='存储可替代代币持有者余额信息';
 
+-- Index Build Status Table
+CREATE TABLE IF NOT EXISTS `t_index_build_status` (
+  `id` int ,
+  `name` varchar(32) NOT NULL UNIQUE,
+  `value` text
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='索引构建状态';
+
+insert into t_index_build_status (id, name, value) values (1, 'index_height', 0);
+insert into t_index_build_status (id, name, value) values (2, 'mempool', '[]');
+insert into t_index_build_status (id, name, value) values (3, 'last_mempool', '[]');
+
 -- Restore foreign key checks
 SET FOREIGN_KEY_CHECKS = 1; 
