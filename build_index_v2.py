@@ -1002,7 +1002,7 @@ async def save_build_status(conn, height, tx_pool, last_tx_pool):
 
     return
 
-async def load_build_status() -> tuple[int, list[str], list[str]]:
+async def load_build_status():
     """加载构建状态"""
     sql = """
     SELECT value FROM t_index_build_status WHERE name = %s
@@ -1148,15 +1148,15 @@ async def clean_transactions_keep_minimum_per_user():
         # 删除这些交易的所有相关记录
         if txs_to_delete:
             placeholders = ','.join(['%s'] * len(txs_to_delete))
-            
+
             # 删除相关的address_transactions记录
             addr_tx_del_query = f"DELETE FROM address_transactions WHERE tx_hash IN ({placeholders})"
             await DBManager.execute_update(addr_tx_del_query, tuple(txs_to_delete))
-            
+
             # 删除相关的transaction_participants记录
             participants_del_query = f"DELETE FROM transaction_participants WHERE tx_hash IN ({placeholders})"
             await DBManager.execute_update(participants_del_query, tuple(txs_to_delete))
-            
+
             # 删除transactions记录
             tx_del_query = f"DELETE FROM transactions WHERE tx_hash IN ({placeholders})"
             await DBManager.execute_update(tx_del_query, tuple(txs_to_delete))
