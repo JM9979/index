@@ -8,6 +8,7 @@ from app.dependencies import call_node_rpc
 from app.dependencies import DBManager
 from app.utils import hex_to_json, convert_str_to_sha256
 from app.s3 import S3Uploader
+from datetime import datetime, timezone
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -580,26 +581,372 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, sp
                 await DBManager.execute_update(ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
 
 
-async def scan_chain_and_build_index():
+async def analyze_transaction_data(decode_tx):
     """
-    扫描区块链并构建索引
+    全面分析交易数据，返回交易类型和UTXO类型信息
+    
+    Args:
+        decode_tx: 解码后的交易数据
+        
+    Returns:
+        dict: 包含交易分析结果的字典
     """
-    # 初始化变量
+    result = {
+        'tx_type': 'P2PKH',  # 默认类型
+        'utxo_types': []     # 每个输出的类型
+    }
+    
+    # 分析每个输出，确定交易类型和每个UTXO的类型
+    for i, output in enumerate(decode_tx['vout']):
+        if 'scriptPubKey' not in output or 'asm' not in output['scriptPubKey']:
+            result['utxo_types'].append('UNKNOWN')
+            continue
+            
+        script_asm = output['scriptPubKey']['asm']
+        utxo_type = 'NORMAL'
+        
+        # 判断UTXO类型
+        if script_asm.startswith("9 OP_PICK OP_TOALTSTACK"):
+            utxo_type = 'FT'
+            if result['tx_type'] == 'P2PKH':  # 只有当前类型是默认值时才更新
+                result['tx_type'] = 'TBC20'
+        elif (script_asm.startswith("OP_RETURN") or 
+              script_asm.startswith("0 OP_RETURN")):
+            utxo_type = 'NFT_COLLECTION'
+            if result['tx_type'] == 'P2PKH':
+                result['tx_type'] = 'TBC721'
+        elif (script_asm.startswith("1 OP_PICK 3 OP_SPLIT") or 
+              script_asm.startswith("4 OP_PICK OP_BIN2NUM OP_TOALTSTACK 1 OP_PICK 3 OP_SPLIT")):
+            utxo_type = 'NFT'
+            if result['tx_type'] == 'P2PKH':
+                result['tx_type'] = 'TBC721'
+        elif script_asm.endswith("OP_CHECKMULTISIG"):
+            utxo_type = 'MULTISIG'
+            if result['tx_type'] == 'P2PKH':
+                result['tx_type'] = 'P2MS'
+                
+        result['utxo_types'].append(utxo_type)
+    
+    return result
+
+
+async def process_single_transaction(tx, block_height, timestamp):
+    """
+    处理单个交易，包括交易历史记录和代币操作
+    
+    Args:
+        tx: 交易哈希
+        block_height: 区块高度
+        timestamp: 时间戳
+        
+    Returns:
+        bool: 处理是否成功
+    """
+    try:
+        # 解码原始交易
+        decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
+        decode_txid = decode_tx["txid"]
+
+        # 检查黑名单
+        if is_in_blacklist(decode_txid):
+            return False
+        
+        # 分析交易数据，获取交易类型和UTXO类型
+        tx_analysis = await analyze_transaction_data(decode_tx)
+        
+        # 处理交易历史记录
+        await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+        
+        # 处理代币相关UTXO
+        await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
+        
+        return True
+    except Exception as e:
+        logging.error("处理交易 %s 时出错: %s", tx, str(e))
+        return False
+
+
+def is_in_blacklist(txid):
+    """检查交易ID是否在黑名单中"""
+    try:
+        with open('black_list.txt', 'r', encoding='utf-8') as file:
+            black_list = [line.strip() for line in file]
+        return txid in black_list
+    except FileNotFoundError:
+        return False
+
+
+async def process_transaction_record(decode_tx, block_height, timestamp, tx_type=None):
+    """
+    处理交易历史记录并更新相关表
+    
+    Args:
+        decode_tx: 解码后的交易数据
+        block_height: 区块高度
+        timestamp: 时间戳
+        tx_type: 交易类型，如果为None则自动确定
+    """
+    decode_txid = decode_tx["txid"]
+    logging.info("处理交易历史: %s, 区块高度: %s, 时间戳: %s", decode_txid, block_height, timestamp)
+    
+    # 分析交易并提取数据
+    balance_changes = {}
+    total_spend = 0
+    total_receive = 0
+    senders = set()
+    receivers = set()
+    
+    # 如果没有提供交易类型，则确定交易类型
+    if tx_type is None:
+        tx_type = determine_tx_type(decode_tx)
+    
+    # 处理输出，获取接收方和总接收金额
+    for output in decode_tx['vout']:
+        value_get = round(float(output.get('value', 0)) * 1_000_000)
+        total_receive += value_get
+        
+        if "scriptPubKey" in output:
+            if output["scriptPubKey"].get("type") == "pubkeyhash" and "addresses" in output["scriptPubKey"]:
+                for addr in output['scriptPubKey']['addresses']:
+                    receivers.add(addr)
+                    balance_changes[addr] = balance_changes.get(addr, 0) + value_get
+            elif output["scriptPubKey"]["asm"].endswith("OP_CHECKMULTISIG"):
+                try:
+                    from app.utils import convert_p2ms_script_to_ms_address
+                    ms_address = convert_p2ms_script_to_ms_address(output["scriptPubKey"]["asm"])
+                    receivers.add(ms_address)
+                    balance_changes[ms_address] = balance_changes.get(ms_address, 0) + value_get
+                except (ValueError, ImportError):
+                    pass
+    
+    # 处理输入，获取发送方和总支出金额
+    for vin in decode_tx['vin']:
+        if "txid" not in vin:
+            senders.add("coinbase")
+            total_spend += 325
+        else:
+            vin_txid = vin['txid']
+            vin_vout = vin['vout']
+            try:
+                vin_decode = await syclic_call_rpc(method="getrawtransaction", params=[vin_txid, 1])
+                value_spend = round(float(vin_decode['vout'][vin_vout].get('value', 0)) * 1_000_000)
+                total_spend += value_spend
+                
+                if "scriptPubKey" in vin_decode['vout'][vin_vout]:
+                    if vin_decode['vout'][vin_vout]['scriptPubKey'].get("type") == "pubkeyhash" and "addresses" in vin_decode['vout'][vin_vout]['scriptPubKey']:
+                        for addr in vin_decode['vout'][vin_vout]['scriptPubKey']['addresses']:
+                            senders.add(addr)
+                            balance_changes[addr] = balance_changes.get(addr, 0) - value_spend
+                    elif vin_decode['vout'][vin_vout]['scriptPubKey']['asm'].endswith("OP_CHECKMULTISIG"):
+                        try:
+                            from app.utils import convert_p2ms_script_to_ms_address
+                            ms_address = convert_p2ms_script_to_ms_address(vin_decode['vout'][vin_vout]['scriptPubKey']['asm'])
+                            senders.add(ms_address)
+                            balance_changes[ms_address] = balance_changes.get(ms_address, 0) - value_spend
+                        except (ValueError, ImportError):
+                            pass
+            except Exception as e:
+                logging.error("处理交易输入 %s 时出错: %s", decode_txid, str(e))
+    
+    # 计算手续费
+    fee = (total_spend - total_receive) / 1_000_000
+    fee_str = f"{fee:f}".rstrip('0').rstrip('.')
+    
+    # 格式化时间
+    utc_time = "unconfirmed" if block_height < 1 else datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 更新数据库
+    await update_transaction_tables(decode_txid, fee_str, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers)
+
+
+def determine_tx_type(decode_tx):
+    """
+    确定交易类型
+    
+    Args:
+        decode_tx: 解码后的交易数据
+        
+    Returns:
+        str: 交易类型，如 "P2PKH"、"TBC20"、"TBC721" 等
+    """
+    tx_type = "P2PKH"  # 默认类型
+    
+    for output in decode_tx['vout']:
+        script_asm = output["scriptPubKey"]["asm"]
+        if script_asm.startswith("9 OP_PICK OP_TOALTSTACK"):
+            tx_type = "TBC20"
+            break
+        elif (script_asm.startswith("OP_RETURN") or 
+              script_asm.startswith("0 OP_RETURN") or 
+              script_asm.startswith("1 OP_PICK")):
+            tx_type = "TBC721"
+            break
+        elif script_asm.endswith("OP_CHECKMULTISIG"):
+            tx_type = "P2MS"
+            break
+            
+    return tx_type
+
+
+async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers):
+    """
+    更新交易相关数据表
+    
+    Args:
+        tx_hash: 交易哈希
+        fee: 手续费
+        timestamp: 时间戳
+        utc_time: UTC时间
+        tx_type: 交易类型
+        block_height: 区块高度
+        balance_changes: 余额变化字典
+        senders: 发送方集合
+        receivers: 接收方集合
+    """
+    # 1. 存储交易基本信息
+    transactions_insert_query = """
+    INSERT INTO transactions (tx_hash, fee, time_stamp, utc_time, tx_type, block_height)
+    VALUES (%s, %s, %s, %s, %s, %s) AS new
+    ON DUPLICATE KEY UPDATE
+        fee = new.fee,
+        time_stamp = new.time_stamp,
+        utc_time = new.utc_time,
+        tx_type = new.tx_type,
+        block_height = new.block_height,
+        updated_at = CURRENT_TIMESTAMP
+    """
+    await DBManager.execute_update(transactions_insert_query, (
+        tx_hash, fee, timestamp, utc_time, tx_type, block_height
+    ))
+    
+    # 2. 处理地址交易关系
+    for address, balance_change in balance_changes.items():
+        is_sender = address in senders
+        is_recipient = address in receivers
+        
+        # 格式化余额变化
+        balance_float = balance_change / 1_000_000
+        formatted_balance = f"{balance_float:.8f}".rstrip('0').rstrip('.')
+        if formatted_balance in ('', '+'):
+            formatted_balance = "0"
+        
+        address_tx_insert_query = """
+        INSERT INTO address_transactions (address, tx_hash, is_sender, is_recipient, balance_change)
+        VALUES (%s, %s, %s, %s, %s) AS new
+        ON DUPLICATE KEY UPDATE
+            is_sender = new.is_sender,
+            is_recipient = new.is_recipient,
+            balance_change = new.balance_change,
+            updated_at = CURRENT_TIMESTAMP
+        """
+        await DBManager.execute_update(address_tx_insert_query, (
+            address, tx_hash, is_sender, is_recipient, formatted_balance
+        ))
+    
+    # 3. 处理交易参与方
+    # 清除旧记录
+    await DBManager.execute_update("DELETE FROM transaction_participants WHERE tx_hash = %s", (tx_hash,))
+    
+    # 插入发送方
+    for sender in senders:
+        await DBManager.execute_update(
+            "INSERT INTO transaction_participants (tx_hash, address, role) VALUES (%s, %s, %s)",
+            (tx_hash, sender, "sender")
+        )
+    
+    # 插入接收方
+    for receiver in receivers:
+        await DBManager.execute_update(
+            "INSERT INTO transaction_participants (tx_hash, address, role) VALUES (%s, %s, %s)",
+            (tx_hash, receiver, "recipient")
+        )
+
+
+async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
+    """
+    处理交易中的各种UTXO（FT/NFT等）
+    
+    Args:
+        decode_tx: 解码后的交易数据
+        timestamp: 时间戳
+        utxo_types: 每个输出的类型列表，如果为None则实时判断
+    """
+    output_index = 0
+    
+    while output_index < len(decode_tx["vout"]):
+        if output_index >= len(decode_tx["vout"]):
+            break
+        
+        # 如果提供了UTXO类型，则使用它
+        if utxo_types and output_index < len(utxo_types):
+            utxo_type = utxo_types[output_index]
+        else:
+            # 否则实时判断UTXO类型
+            script_asm = decode_tx["vout"][output_index]["scriptPubKey"]["asm"]
+            if script_asm.startswith("0 OP_RETURN") or script_asm.startswith("OP_RETURN"):
+                utxo_type = 'NFT_COLLECTION'
+            elif script_asm.startswith("1 OP_PICK 3 OP_SPLIT") or script_asm.startswith("4 OP_PICK OP_BIN2NUM OP_TOALTSTACK 1 OP_PICK 3 OP_SPLIT"):
+                utxo_type = 'NFT'
+            elif script_asm.startswith("9 OP_PICK OP_TOALTSTACK"):
+                utxo_type = 'FT'
+            else:
+                utxo_type = 'NORMAL'
+        
+        # 根据UTXO类型处理
+        if utxo_type == 'NFT_COLLECTION':
+            new_output_index, _ = await process_nft_collections(decode_tx, output_index, timestamp)
+            output_index = new_output_index
+        elif utxo_type == 'NFT':
+            new_output_index, _ = await process_nft_utxo_set(decode_tx, output_index, timestamp)
+            output_index = new_output_index
+        elif utxo_type == 'FT':
+            new_output_index, ft_contract_id, vout_combine_script, ft_balance = await process_ft_tokens(decode_tx, output_index, timestamp)
+            output_index = new_output_index
+            
+            # 处理FT代币的UTXO集合
+            spent_utxo_info = await process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
+            
+            # 处理FT代币余额
+            await process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info)
+        else:
+            output_index += 1
+
+
+async def check_block_height():
+    """
+    检查当前区块高度并确定是否追上最新区块
+    
+    Returns:
+        tuple: (if_catch_lastest, block_count_res)
+    """
     global index_interval
     global index_height
-    global mempool
-    global last_mempool
-    if_catch_lastest = False
-
-    # 如果当前高度更高或相等，index_height加一并标记
+    
     block_count_res = await syclic_call_rpc(method="getblockcount", params=[])
+    if_catch_lastest = False
+    
     if block_count_res < index_height:
         if_catch_lastest = True
         index_interval = 2
+    
+    logging.info("扫描区块链... 当前索引高度: %s, 区块链高度: %s, 是否追上最新: %s", 
+                 index_height, block_count_res, if_catch_lastest)
+    
+    return if_catch_lastest, block_count_res
 
-    logging.info("Scanning chain and building index... index_height: %s, block_count_res: %s, if_catch_lastest: %s", index_height, block_count_res, if_catch_lastest)
 
-    # 更新内存池并寻找新交易
+async def get_mempool_and_timestamp(if_catch_lastest):
+    """
+    获取当前内存池和时间戳
+    
+    Args:
+        if_catch_lastest: 是否已追上最新区块
+        
+    Returns:
+        tuple: (current_mempool, timestamp)
+    """
+    global index_height
+    
     if if_catch_lastest:
         current_mempool = await syclic_call_rpc(method="getrawmempool", params=[])
         timestamp = int(time.time())
@@ -607,60 +954,88 @@ async def scan_chain_and_build_index():
         get_block_res = await syclic_call_rpc(method="getblockbyheight", params=[index_height, 1])
         current_mempool = get_block_res["tx"]
         timestamp = get_block_res["time"]
+    
+    return current_mempool, timestamp
 
+
+def find_new_transactions(current_mempool):
+    """
+    找出新的交易
+    
+    Args:
+        current_mempool: 当前内存池
+        
+    Returns:
+        list: 新交易列表
+    """
+    global mempool
+    global last_mempool
+    
     nearly_mempool = mempool + last_mempool
     new_txs = [tx for tx in current_mempool if tx not in nearly_mempool]
+    
+    return new_txs
 
-    # 为新交易构建索引
+
+async def process_transactions(new_txs, if_catch_lastest, timestamp):
+    """
+    处理新交易
+    
+    Args:
+        new_txs: 新交易列表
+        if_catch_lastest: 是否已追上最新区块
+        timestamp: 时间戳
+    """
+    global mempool
+    global index_height
+    
     for tx in new_txs:
         mempool.append(tx)
+        block_height = index_height if not if_catch_lastest else -1
+        await process_single_transaction(tx, block_height, timestamp)
 
-        # 解码原始交易
-        decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
-        decode_txid = decode_tx["txid"]
 
-        # 从文件读取黑名单
-        try:
-            with open('black_list.txt', 'r', encoding='utf-8') as file:
-                black_list = [line.strip() for line in file]
-        except FileNotFoundError:
-            black_list = []
-        if decode_txid in black_list:
-            continue
-
-        # 为新UTXO和FT/Collection信息构建索引
-        output_index = 0
-        while output_index < len(decode_tx["vout"]):
-            # 处理各种类型的UTXO
-            if decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("0 OP_RETURN") or decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("OP_RETURN"):
-                # 处理NFT集合
-                new_output_index, _ = await process_nft_collections(decode_tx, output_index, timestamp)
-                output_index = new_output_index
-            elif decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("1 OP_PICK 3 OP_SPLIT") or decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("4 OP_PICK OP_BIN2NUM OP_TOALTSTACK 1 OP_PICK 3 OP_SPLIT"):
-                # 处理NFT
-                new_output_index, _ = await process_nft_utxo_set(decode_tx, output_index, timestamp)
-                output_index = new_output_index
-            elif decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("9 OP_PICK OP_TOALTSTACK"):
-                # 处理FT代币
-                new_output_index, ft_contract_id, vout_combine_script, ft_balance = await process_ft_tokens(decode_tx, output_index, timestamp)
-                output_index = new_output_index
-                
-                # 处理FT代币的UTXO集合
-                spent_utxo_info = await process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
-                
-                # 处理FT代币余额
-                await process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info)
-            else:
-                output_index += 1
-                continue
-
-    # 如果当前高度更高，在建立索引后清除内存池
+def update_mempool_state(if_catch_lastest):
+    """
+    更新内存池状态
+    
+    Args:
+        if_catch_lastest: 是否已追上最新区块
+    """
+    global index_height
+    global mempool
+    global last_mempool
+    
     if not if_catch_lastest:
         index_height += 1
         last_mempool = mempool
         mempool = []
+
+
+async def scan_chain_and_build_index():
+    """
+    扫描区块链并构建索引
+    """
+    try:
+        # 检查区块高度并确定是否为最新区块
+        if_catch_lastest, _ = await check_block_height()
         
-    return
+        # 获取当前内存池和时间戳
+        current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
+        
+        # 找出新交易
+        new_txs = find_new_transactions(current_mempool)
+        
+        # 处理新交易
+        await process_transactions(new_txs, if_catch_lastest, timestamp)
+        
+        # 更新内存池状态
+        update_mempool_state(if_catch_lastest)
+        
+        return True
+    except Exception as e:
+        logging.error("扫描区块链出错: %s", str(e))
+        return False
 
 
 if __name__ == "__main__":
