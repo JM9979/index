@@ -2,7 +2,7 @@ import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 import logging
 from urllib.parse import urlparse
-from config import config
+from app.config import config
 
 class S3Uploader:
     def __init__(self, aws_access_key_id=None, aws_secret_access_key=None, region_name=None):
