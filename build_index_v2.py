@@ -5,6 +5,7 @@ import logging
 import os
 import base64
 import tempfile
+import argparse
 from app.dependencies import call_node_rpc
 from app.dependencies import DBManager
 from app.utils import hex_to_json, convert_str_to_sha256
@@ -13,6 +14,10 @@ from datetime import datetime, timezone, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Build index for blockchain data')
+parser.add_argument('--clear-db', action='store_true', help='Clear database before building index')
 
 first_index_height = 862600
 # 定义并初始化全局变量
@@ -1185,8 +1190,11 @@ async def task_wrapper():
         await scan_chain_and_build_index()
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    args = parser.parse_args()
+    
     # 定义全局变量
     last_cleanup_date = None
     
-    # 每 15 秒调用一次 task_wrapper
-    schedule_task(task_wrapper)
+    # 每 15 秒调用一次 task_wrapper，传入命令行参数
+    schedule_task(task_wrapper, clear_db=args.clear_db)
