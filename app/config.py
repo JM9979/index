@@ -12,7 +12,7 @@ class Config:
     MYSQL_HOST = "localhost"
     MYSQL_PORT = 3306
     MYSQL_USER = "root"
-    MYSQL_PASS = "mysql149"  # 替换为实际的密码
+    MYSQL_PASS = "123456"  # 替换为实际的密码
     MYSQL_DB = "TBC20721"
     
     # AWS S3配置

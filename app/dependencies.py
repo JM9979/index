@@ -84,3 +84,12 @@ class DBManager:
             async with conn.cursor() as cur:
                 await cur.execute(query, params or ())
                 await conn.commit()
+
+                
+    @staticmethod
+    async def execute_update_nocommit(conn, query, params=None):
+        """
+        执行 SQL 更新语句但不提交 (INSERT, UPDATE, DELETE)
+        """
+        async with conn.cursor() as cur:
+            await cur.execute(query, params or ())
