@@ -8,7 +8,7 @@ from app.dependencies import call_node_rpc
 from app.dependencies import DBManager
 from app.utils import hex_to_json, convert_str_to_sha256
 from app.s3 import S3Uploader
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -654,6 +654,9 @@ async def process_single_transaction(tx, block_height, timestamp):
         # 分析交易数据，获取交易类型和UTXO类型
         tx_analysis = await analyze_transaction_data(decode_tx)
         
+        # 处理交易历史记录
+        await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+
         # 处理代币相关UTXO
         await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
         
@@ -1035,12 +1038,87 @@ async def scan_chain_and_build_index():
         return False
 
 
-if __name__ == "__main__":
-    async def task_wrapper():
+async def clean_transactions_keep_minimum_per_user():
+    """清理策略：确保每个用户至少保留30条最新交易记录"""
+    
+    # 查询所有地址
+    address_query = "SELECT DISTINCT address FROM address_transactions"
+    addresses = await DBManager.execute_query(address_query, ())
+    
+    # 收集每个地址需要保留的交易
+    preserved_txs = set()
+    
+    for (address,) in addresses:
+        # 获取该地址的最新30条交易
+        recent_txs_query = """
+        SELECT at.tx_hash FROM address_transactions at
+        JOIN transactions t ON at.tx_hash = t.tx_hash
+        WHERE at.address = %s
+        ORDER BY t.time_stamp DESC LIMIT 30
         """
-        Task wrapper.
-        """
+        recent_txs = await DBManager.execute_query(recent_txs_query, (address,))
+        
+        # 将这些交易加入保留列表
+        for (tx_hash,) in recent_txs:
+            preserved_txs.add(tx_hash)
+    
+    # 查询所有交易
+    all_txs_query = "SELECT tx_hash FROM transactions"
+    all_txs = await DBManager.execute_query(all_txs_query, ())
+    
+    # 找出可以删除的交易(不在任何用户的保留列表中)
+    txs_to_delete = []
+    for (tx_hash,) in all_txs:
+        if tx_hash not in preserved_txs:
+            txs_to_delete.append(tx_hash)
+    
+    # 删除这些交易的所有相关记录
+    if txs_to_delete:
+        placeholders = ','.join(['%s'] * len(txs_to_delete))
+        
+        # 删除相关的address_transactions记录
+        addr_tx_del_query = f"DELETE FROM address_transactions WHERE tx_hash IN ({placeholders})"
+        await DBManager.execute_update(addr_tx_del_query, tuple(txs_to_delete))
+        
+        # 删除相关的transaction_participants记录
+        participants_del_query = f"DELETE FROM transaction_participants WHERE tx_hash IN ({placeholders})"
+        await DBManager.execute_update(participants_del_query, tuple(txs_to_delete))
+        
+        # 删除transactions记录
+        tx_del_query = f"DELETE FROM transactions WHERE tx_hash IN ({placeholders})"
+        await DBManager.execute_update(tx_del_query, tuple(txs_to_delete))
+    
+    logging.info(f"已清理{len(txs_to_delete)}条交易记录，确保每个用户至少保留30条最新交易")
+
+
+async def task_wrapper():
+    """
+    Task wrapper.
+    """
+    # 使用全局变量存储上次清理日期
+    global last_cleanup_date
+    
+    # 获取当前北京时间（UTC+8）
+    current_time = datetime.now(timezone(timedelta(hours=8)))
+    current_date = current_time.date()
+    
+    # 检查是否到达凌晨3点且与上次清理不在同一天
+    if (current_time.hour == 3 and current_time.minute < 15 and 
+        (last_cleanup_date is None or current_date != last_cleanup_date)):
+        logging.info("执行定时清理任务，时间: %s", current_time)
+        try:
+            await clean_transactions_keep_minimum_per_user()
+            last_cleanup_date = current_date
+            logging.info("清理任务完成")
+        except Exception as e:
+            logging.error("清理任务执行出错: %s", str(e))
+    
+    # 正常的区块链扫描任务
         await scan_chain_and_build_index()
 
+if __name__ == "__main__":
+    # 定义全局变量
+    last_cleanup_date = None
+    
     # 每 15 秒调用一次 task_wrapper
     schedule_task(task_wrapper)
