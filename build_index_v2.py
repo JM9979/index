@@ -1078,6 +1078,9 @@ async def clear_db():
     TRUNCATE TABLE `ft_txo_set`;
     TRUNCATE TABLE `nft_collections`;
     TRUNCATE TABLE `nft_utxo_set`;
+    TRUNCATE TABLE `address_transactions`;
+    TRUNCATE TABLE `transactions`;
+    TRUNCATE TABLE `transaction_participants`;
     SET FOREIGN_KEY_CHECKS = 1;
     """
     async with DBManager._pool.acquire() as conn:
