@@ -969,7 +969,8 @@ async def process_transactions(conn, new_txs, if_catch_lastest, timestamp):
         block_height = index_height if not if_catch_lastest else -1
         success = await process_single_transaction(conn, tx, block_height, timestamp)
         if not success:
-            raise Exception(f"处理交易 {tx} 失败")
+            # raise Exception(f"处理交易 {tx} 失败")
+            logging.error("处理交易 %s 失败", tx, exc_info=True)
     logging.info("处理新交易完成, 新交易数量: %s", len(new_txs))
 
 
