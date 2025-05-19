@@ -99,7 +99,17 @@ async def syclic_call_rpc(method, params):
 
 
 async def process_nft_collections(conn, decode_tx, output_index, timestamp):
-    """处理NFT集合信息并更新nft_collections表"""
+    """处理NFT集合信息并更新nft_collections表
+    
+    Returns:
+        tuple: (output_index, collection_id)
+            - output_index: 下一个要处理的输出索引
+            - collection_id: 集合ID，如果处理失败则为None
+            
+    Raises:
+        ValueError: 当集合协议错误、解码错误或供应量错误时
+        Exception: 当数据库操作或S3上传失败时
+    """
     decode_txid = decode_tx["txid"]
     
     if not (decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("0 OP_RETURN") or 
@@ -109,11 +119,14 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
     logging.info("TBC721 Collection:      %s", decode_txid)
 
     if len(decode_tx["vout"]) - output_index <= 1:
-        logging.error("Error Collection Protocal: %s", decode_txid)
-        return output_index + 1, None
+        error_msg = f"Error Collection Protocol: insufficient outputs for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+        
     if decode_tx["vout"][output_index + 1]["scriptPubKey"]["type"] != "pubkeyhash":
-        logging.error("Error Collection Protocal: %s", decode_txid)
-        return output_index + 1, None
+        error_msg = f"Error Collection Protocol: invalid script type for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
 
     # 准备集合插入数据
     collection_id = decode_txid
@@ -128,9 +141,10 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
     
     try:
         collection_tape_json = hex_to_json(collection_tape_hex)
-    except ValueError:
-        logging.error("Error decoding Collection tape %s", decode_txid)
-        return output_index + 1, None
+    except ValueError as e:
+        error_msg = f"Error decoding Collection tape {decode_txid}: {str(e)}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
         
     collection_name = collection_tape_json.get("collectionName", "")[:64]
     collection_symbol = collection_tape_json.get("symbol", "")[:64]
@@ -139,8 +153,9 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
     collection_supply = collection_tape_json.get("supply", 0)
     
     if collection_supply <= 0:
-        logging.error("Wrong Collection supply input: %s", decode_txid)
-        return output_index + 1, None
+        error_msg = f"Wrong Collection supply input: {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
     
     # 处理集合图标 - 上传到S3
     collection_icon = collection_tape_json.get("file", "")
@@ -153,8 +168,9 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
                 object_name=object_name
             )
         except Exception as e:
-            logging.error("Error uploading collection icon to S3: %s", str(e))
-            # 如果上传失败，保留原始数据
+            error_msg = f"Error uploading collection icon to S3 for {decode_txid}: {str(e)}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
 
     # 插入记录到 nft_collections 表
     nft_collection_insert_query = """
@@ -175,12 +191,23 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
         await DBManager.execute_update_nocommit(conn, nft_collection_insert_query, (collection_id, collection_name, collection_creator_address, collection_creator_script_hash, collection_symbol, collection_attributes, collection_description, collection_supply, collection_create_timestamp, collection_icon))
         return output_index + collection_supply, collection_id
     except Exception as e:
-        logging.error("Error inserting collection %s: %s", decode_txid, e)
-        return output_index + 1, None
+        error_msg = f"Error inserting collection {decode_txid}: {str(e)}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
 
 
 async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
-    """处理NFT信息并更新nft_utxo_set表"""
+    """处理NFT信息并更新nft_utxo_set表
+    
+    Returns:
+        tuple: (output_index, nft_contract_id)
+            - output_index: 下一个要处理的输出索引
+            - nft_contract_id: NFT合约ID
+            
+    Raises:
+        ValueError: 当NFT协议错误、解码错误或数据验证失败时
+        Exception: 当数据库操作失败时
+    """
     decode_txid = decode_tx["txid"]
     
     if not (decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("1 OP_PICK 3 OP_SPLIT") or 
@@ -193,8 +220,9 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
         logging.info("TBC721 NFT:             %s", decode_txid)
 
         if len(decode_tx["vout"]) - output_index <= 2:
-            logging.error("Error NFT Protocal: %s", decode_txid)
-            return output_index + 1, None
+            error_msg = f"Error NFT Protocol: insufficient outputs for {decode_txid}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
 
         # 解码 tape json
         if decode_tx['vout'][output_index + 2]['scriptPubKey']['asm'].startswith("0 OP_RETURN"):
@@ -202,8 +230,9 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
         elif decode_tx['vout'][output_index + 2]['scriptPubKey']['asm'].startswith("OP_RETURN"):
             nft_tape_hex = decode_tx['vout'][output_index + 2]['scriptPubKey']['asm'][10:-10]
         else:
-            logging.error("Error decoding nft scriptPubKey asm %s", decode_txid)
-            return output_index + 1, None
+            error_msg = f"Error decoding NFT scriptPubKey asm for {decode_txid}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
         
         try:
             nft_tape_json = hex_to_json(nft_tape_hex)
@@ -217,8 +246,9 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
         logging.info("Pool NFT:               %s", decode_txid)
         
         if len(decode_tx["vout"]) - output_index <= 1:
-            logging.error("Error Pool NFT Protocal: %s", decode_txid)
-            return output_index + 1, None
+            error_msg = f"Error Pool NFT Protocol: insufficient outputs for {decode_txid}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
             
         nft_tape_hex = "POOLNFT"
         pool_tape_list = decode_tx["vout"][output_index + 1]["scriptPubKey"]["asm"].split(" ")
@@ -227,8 +257,9 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
         nft_offset = 2
         
     else:
-        logging.error("Error decoding nft scriptPubKey asm %s", decode_txid)
-        return output_index + 1, None
+        error_msg = f"Error decoding NFT scriptPubKey asm for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
     
     # 准备 NFT 插入数据
     nft_code_balance = round(decode_tx["vout"][output_index]["value"] * 1_000_000)
@@ -251,13 +282,15 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
             if nft_contract_id_res:
                 nft_contract_id = nft_contract_id_res[0][0]
             else:
-                logging.error("Can not find which NFT the first input belong %s", decode_txid)
-                return output_index + 1, None
+                error_msg = f"Cannot find which NFT the first input belongs to for {decode_txid}"
+                logging.error(error_msg)
+                raise ValueError(error_msg)
         else:
             nft_file = nft_tape_json.get("file", "")
             if len(nft_file) != 72:
-                logging.error("Error NFT Transfer Tape file: %s", decode_txid)
-                return output_index + 1, None
+                error_msg = f"Error NFT Transfer Tape file (invalid length): {decode_txid}"
+                logging.error(error_msg)
+                raise ValueError(error_msg)
             nft_contract_id = nft_file[:64]
 
         nft_update_query = """
@@ -317,8 +350,9 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
                         object_name=object_name
                     )
                 except Exception as e:
-                    logging.error("Error uploading NFT icon to S3: %s", str(e))
-                    # 如果上传失败，保留原始数据
+                    error_msg = f"Error uploading NFT icon to S3 for {decode_txid}: {str(e)}"
+                    logging.error(error_msg)
+                    # 在这里不抛出异常，保留原始数据，因为图标上传失败不应该中断整个处理流程
         
         nft_utxo_set_insert_query = """
         INSERT INTO nft_utxo_set (nft_contract_id, collection_id, collection_index, collection_name, nft_utxo_id, nft_code_balance, nft_p2pkh_balance, nft_name, nft_symbol, nft_attributes, nft_description, nft_transfer_time_count, nft_holder_address, nft_holder_script_hash, nft_create_timestamp, nft_last_transfer_timestamp, nft_icon)
@@ -347,15 +381,28 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
 
 
 async def process_ft_tokens(conn, decode_tx, output_index, timestamp):
-    """处理同质化代币信息并更新ft_tokens表"""
+    """处理同质化代币信息并更新ft_tokens表
+    
+    Returns:
+        tuple: (output_index, ft_contract_id, vout_combine_script, ft_balance)
+            - output_index: 下一个要处理的输出索引
+            - ft_contract_id: 代币合约ID
+            - vout_combine_script: 组合脚本
+            - ft_balance: 代币余额
+            
+    Raises:
+        ValueError: 当代币协议错误或验证失败时
+        Exception: 当数据库操作失败时
+    """
     decode_txid = decode_tx["txid"]
     
     if not decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("9 OP_PICK OP_TOALTSTACK"):
         return output_index + 1, None, None, None
     
     if len(decode_tx["vout"]) - output_index <= 1:
-        logging.error("Error FT Protocal: %s", decode_txid)
-        return output_index + 1, None, None, None
+        error_msg = f"Error FT Protocol: insufficient outputs for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
 
     # 排除错误版本的 TBC20
     if decode_tx["vout"][output_index]["scriptPubKey"]["asm"][-32:-11] == "OP_CHECKSIG OP_RETURN":
@@ -415,51 +462,68 @@ async def process_ft_tokens(conn, decode_tx, output_index, timestamp):
         ft_symbol = bytes.fromhex(ft_tape_info[4+ft_name_len*2:4+ft_name_len*2+ft_symbol_len*2]).decode('utf-8')[:64]
         
         # 插入记录到 ft_tokens 表
-        ft_token_insert_query = """
-        INSERT INTO ft_tokens (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, 
-                            ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
-        ON DUPLICATE KEY UPDATE
-            ft_code_script = new.ft_code_script,
-            ft_supply = new.ft_supply,
-            ft_decimal = new.ft_decimal,
-            ft_name = new.ft_name,
-            ft_symbol = new.ft_symbol,
-            ft_description = new.ft_description,
-            ft_origin_utxo = new.ft_origin_utxo,
-            ft_creator_combine_script = new.ft_creator_combine_script,
-            ft_holders_count = new.ft_holders_count,
-            ft_icon_url = new.ft_icon_url,
-            ft_create_timestamp = new.ft_create_timestamp,
-            ft_token_price = new.ft_token_price
-        """
-        await DBManager.execute_update_nocommit(conn, ft_token_insert_query, (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price))
+        try:
+            ft_token_insert_query = """
+            INSERT INTO ft_tokens (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, 
+                                ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
+            ON DUPLICATE KEY UPDATE
+                ft_code_script = new.ft_code_script,
+                ft_supply = new.ft_supply,
+                ft_decimal = new.ft_decimal,
+                ft_name = new.ft_name,
+                ft_symbol = new.ft_symbol,
+                ft_description = new.ft_description,
+                ft_origin_utxo = new.ft_origin_utxo,
+                ft_creator_combine_script = new.ft_creator_combine_script,
+                ft_holders_count = new.ft_holders_count,
+                ft_icon_url = new.ft_icon_url,
+                ft_create_timestamp = new.ft_create_timestamp,
+                ft_token_price = new.ft_token_price
+            """
+            await DBManager.execute_update_nocommit(conn, ft_token_insert_query, (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price))
+        except Exception as e:
+            error_msg = f"Error inserting FT token {decode_txid}: {str(e)}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
         
     return output_index + 2, ft_contract_id, vout_combine_script, ft_balance
 
 
 async def process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance):
-    """处理同质化代币UTXO并更新ft_txo_set表"""
+    """处理同质化代币UTXO并更新ft_txo_set表
+    
+    Returns:
+        Union[Tuple[str, str, int], None]: 已花费的UTXO信息(ft_contract_id, ft_holder_combine_script, ft_balance)或None
+        
+    Raises:
+        Exception: 当数据库操作失败时
+    """
     decode_txid = decode_tx["txid"]
     
     if ft_contract_id is None:
-        return
+        return None
     
     vout_utxo_balance = round(decode_tx["vout"][output_index - 2]["value"] * 1_000_000)
     if_spend = 0
     
     # 插入记录到 ft_txo_set 表
-    ft_utxo_set_insert_query = """
-    INSERT INTO ft_txo_set (utxo_txid, utxo_vout, ft_holder_combine_script, ft_contract_id, utxo_balance, ft_balance, if_spend)
-    VALUES (%s, %s, %s, %s, %s, %s, %s) AS new
-    ON DUPLICATE KEY UPDATE
-        ft_holder_combine_script = new.ft_holder_combine_script,
-        ft_contract_id = new.ft_contract_id,
-        utxo_balance = new.utxo_balance,
-        ft_balance = new.ft_balance,
-        if_spend = new.if_spend
-    """
-    await DBManager.execute_update_nocommit(conn, ft_utxo_set_insert_query, (decode_txid, output_index - 2, vout_combine_script, ft_contract_id, vout_utxo_balance, ft_balance, if_spend))
+    try:
+        ft_utxo_set_insert_query = """
+        INSERT INTO ft_txo_set (utxo_txid, utxo_vout, ft_holder_combine_script, ft_contract_id, utxo_balance, ft_balance, if_spend)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) AS new
+        ON DUPLICATE KEY UPDATE
+            ft_holder_combine_script = new.ft_holder_combine_script,
+            ft_contract_id = new.ft_contract_id,
+            utxo_balance = new.utxo_balance,
+            ft_balance = new.ft_balance,
+            if_spend = new.if_spend
+        """
+        await DBManager.execute_update_nocommit(conn, ft_utxo_set_insert_query, (decode_txid, output_index - 2, vout_combine_script, ft_contract_id, vout_utxo_balance, ft_balance, if_spend))
+    except Exception as e:
+        error_msg = f"Error inserting FT UTXO {decode_txid}: {str(e)}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
     
     # 更新已花费的 UTXO
     for vin in decode_tx["vin"]:
@@ -472,12 +536,17 @@ async def process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout
             ft_txo_query_res = await DBManager.execute_query(ft_txo_query, (vin["txid"], vin["vout"]))
             if ft_txo_query_res:
                 # 更新 ft_txo_set
-                ft_utxo_update_query = """
-                UPDATE ft_txo_set
-                SET if_spend = 1
-                WHERE utxo_txid = %s AND utxo_vout = %s
-                """
-                await DBManager.execute_update_nocommit(conn, ft_utxo_update_query, (vin["txid"], vin["vout"]))
+                try:
+                    ft_utxo_update_query = """
+                    UPDATE ft_txo_set
+                    SET if_spend = 1
+                    WHERE utxo_txid = %s AND utxo_vout = %s
+                    """
+                    await DBManager.execute_update_nocommit(conn, ft_utxo_update_query, (vin["txid"], vin["vout"]))
+                except Exception as e:
+                    error_msg = f"Error updating spent UTXO {vin['txid']}:{vin['vout']}: {str(e)}"
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
                 
                 # 返回已花费的UTXO信息，供ft_balance处理函数使用
                 return ft_txo_query_res[0]
@@ -486,74 +555,108 @@ async def process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout
 
 
 async def process_ft_balance(conn, ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info=None):
-    """处理同质化代币余额并更新ft_balance表"""
+    """处理同质化代币余额并更新ft_balance表
+    
+    Raises:
+        Exception: 当数据库操作失败时
+    """
     if ft_contract_id is None:
         return
     
     # 如果 ft_balance 记录不存在，插入记录到 ft_balance 表
-    ft_balance_query = """
-    SELECT ft_balance FROM ft_balance WHERE ft_contract_id = %s and ft_holder_combine_script = %s
-    """
-    ft_balance_query_res = await DBManager.execute_query(ft_balance_query, (ft_contract_id, vout_combine_script))
-    
-    if not ft_balance_query_res:
-        ft_balance_insert_query = """
-        INSERT INTO ft_balance (ft_holder_combine_script, ft_contract_id, ft_balance)
-        VALUES (%s, %s, %s)
+    try:
+        ft_balance_query = """
+        SELECT ft_balance FROM ft_balance WHERE ft_contract_id = %s and ft_holder_combine_script = %s
         """
-        await DBManager.execute_update_nocommit(conn, ft_balance_insert_query, (vout_combine_script, ft_contract_id, ft_balance))
+        ft_balance_query_res = await DBManager.execute_query(ft_balance_query, (ft_contract_id, vout_combine_script))
+        
+        if not ft_balance_query_res:
+            try:
+                ft_balance_insert_query = """
+                INSERT INTO ft_balance (ft_holder_combine_script, ft_contract_id, ft_balance)
+                VALUES (%s, %s, %s)
+                """
+                await DBManager.execute_update_nocommit(conn, ft_balance_insert_query, (vout_combine_script, ft_contract_id, ft_balance))
 
-        # ft_holders_count 增加
-        ft_tokens_update = """
-        UPDATE ft_tokens
-        SET ft_holders_count = ft_holders_count + 1
-        WHERE ft_contract_id = %s
-        """
-        await DBManager.execute_update_nocommit(conn, ft_tokens_update, (ft_contract_id,))
-    else:
-        ft_balance_update_query = """
-        UPDATE ft_balance
-        SET ft_balance = ft_balance + %s
-        WHERE ft_holder_combine_script = %s and ft_contract_id = %s
-        """
-        await DBManager.execute_update_nocommit(conn, ft_balance_update_query, (ft_balance, vout_combine_script, ft_contract_id))
+                # ft_holders_count 增加
+                ft_tokens_update = """
+                UPDATE ft_tokens
+                SET ft_holders_count = ft_holders_count + 1
+                WHERE ft_contract_id = %s
+                """
+                await DBManager.execute_update_nocommit(conn, ft_tokens_update, (ft_contract_id,))
+            except Exception as e:
+                error_msg = f"Error inserting FT balance for {ft_contract_id}: {str(e)}"
+                logging.error(error_msg)
+                raise Exception(error_msg)
+        else:
+            try:
+                ft_balance_update_query = """
+                UPDATE ft_balance
+                SET ft_balance = ft_balance + %s
+                WHERE ft_holder_combine_script = %s and ft_contract_id = %s
+                """
+                await DBManager.execute_update_nocommit(conn, ft_balance_update_query, (ft_balance, vout_combine_script, ft_contract_id))
+            except Exception as e:
+                error_msg = f"Error updating FT balance for {ft_contract_id}: {str(e)}"
+                logging.error(error_msg)
+                raise Exception(error_msg)
+    except Exception as e:
+        error_msg = f"Error querying FT balance for {ft_contract_id}: {str(e)}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
     
     # 处理已花费的UTXO对应的余额
     if spent_utxo_info:
-        spent_ft_contract_id, spent_holder_script, spent_ft_balance = spent_utxo_info
-        
-        ft_balance_query = """
-        SELECT ft_balance
-        FROM ft_balance
-        WHERE ft_contract_id = %s AND ft_holder_combine_script = %s
-        """
-        ft_balance_query_res = await DBManager.execute_query(ft_balance_query, (spent_ft_contract_id, spent_holder_script))
-        
-        if ft_balance_query_res:
-            ft_balance_balance = ft_balance_query_res[0][0]
-            # 如果 ft_balance.ft_balance 等于 ft_balance，删除记录并且 ft_tokens.ft_holders_count - 1
-            if ft_balance_balance == spent_ft_balance:
-                ft_balance_delete_query = """
-                DELETE FROM ft_balance 
-                WHERE ft_holder_combine_script = %s 
-                AND ft_contract_id = %s 
-                """
-                await DBManager.execute_update_nocommit(conn, ft_balance_delete_query, (spent_holder_script, spent_ft_contract_id))
-                
-                ft_tokens_update = """
-                UPDATE ft_tokens
-                SET ft_holders_count = ft_holders_count - 1
-                WHERE ft_contract_id = %s
-                """
-                await DBManager.execute_update_nocommit(conn, ft_tokens_update, (spent_ft_contract_id,))
-            elif ft_balance_balance > spent_ft_balance:
-                ft_balance_update_query = """
-                UPDATE ft_balance
-                SET ft_balance = ft_balance - %s
-                WHERE ft_holder_combine_script = %s 
-                AND ft_contract_id = %s 
-                """                            
-                await DBManager.execute_update_nocommit(conn, ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
+        try:
+            spent_ft_contract_id, spent_holder_script, spent_ft_balance = spent_utxo_info
+            
+            ft_balance_query = """
+            SELECT ft_balance
+            FROM ft_balance
+            WHERE ft_contract_id = %s AND ft_holder_combine_script = %s
+            """
+            ft_balance_query_res = await DBManager.execute_query(ft_balance_query, (spent_ft_contract_id, spent_holder_script))
+            
+            if ft_balance_query_res:
+                ft_balance_balance = ft_balance_query_res[0][0]
+                # 如果 ft_balance.ft_balance 等于 ft_balance，删除记录并且 ft_tokens.ft_holders_count - 1
+                if ft_balance_balance == spent_ft_balance:
+                    try:
+                        ft_balance_delete_query = """
+                        DELETE FROM ft_balance 
+                        WHERE ft_holder_combine_script = %s 
+                        AND ft_contract_id = %s 
+                        """
+                        await DBManager.execute_update_nocommit(conn, ft_balance_delete_query, (spent_holder_script, spent_ft_contract_id))
+                        
+                        ft_tokens_update = """
+                        UPDATE ft_tokens
+                        SET ft_holders_count = ft_holders_count - 1
+                        WHERE ft_contract_id = %s
+                        """
+                        await DBManager.execute_update_nocommit(conn, ft_tokens_update, (spent_ft_contract_id,))
+                    except Exception as e:
+                        error_msg = f"Error deleting FT balance for {spent_ft_contract_id}: {str(e)}"
+                        logging.error(error_msg)
+                        raise Exception(error_msg)
+                elif ft_balance_balance > spent_ft_balance:
+                    try:
+                        ft_balance_update_query = """
+                        UPDATE ft_balance
+                        SET ft_balance = ft_balance - %s
+                        WHERE ft_holder_combine_script = %s 
+                        AND ft_contract_id = %s 
+                        """                            
+                        await DBManager.execute_update_nocommit(conn, ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
+                    except Exception as e:
+                        error_msg = f"Error updating spent FT balance for {spent_ft_contract_id}: {str(e)}"
+                        logging.error(error_msg)
+                        raise Exception(error_msg)
+        except Exception as e:
+            error_msg = f"Error processing spent UTXO balance: {str(e)}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
 
 
 async def analyze_transaction_data(decode_tx):
@@ -869,20 +972,31 @@ async def process_tx_utxos(conn, decode_tx, timestamp, utxo_types=None):
         
         # 根据UTXO类型处理
         if utxo_type == 'NFT_COLLECTION':
-            new_output_index, _ = await process_nft_collections(conn, decode_tx, output_index, timestamp)
-            output_index = new_output_index
+            try:
+                new_output_index, _ = await process_nft_collections(conn, decode_tx, output_index, timestamp)
+                output_index = new_output_index
+            except Exception as e:
+                logging.error("处理NFT集合时出错: %s", str(e))
+                break
         elif utxo_type == 'NFT':
-            new_output_index, _ = await process_nft_utxo_set(conn, decode_tx, output_index, timestamp)
-            output_index = new_output_index
+            try:
+                new_output_index, _ = await process_nft_utxo_set(conn, decode_tx, output_index, timestamp)
+                output_index = new_output_index
+            except Exception as e:
+                logging.error("处理NFT时出错: %s", str(e))
+                break
         elif utxo_type == 'FT':
-            new_output_index, ft_contract_id, vout_combine_script, ft_balance = await process_ft_tokens(conn, decode_tx, output_index, timestamp)
-            output_index = new_output_index
+            try:
+                new_output_index, ft_contract_id, vout_combine_script, ft_balance = await process_ft_tokens(conn, decode_tx, output_index, timestamp)
+                output_index = new_output_index
+                # 处理FT代币的UTXO集合
+                spent_utxo_info = await process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
             
-            # 处理FT代币的UTXO集合
-            spent_utxo_info = await process_ft_txo_set(conn, decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
-            
-            # 处理FT代币余额
-            await process_ft_balance(conn, ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info)
+                # 处理FT代币余额
+                await process_ft_balance(conn, ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info)
+            except Exception as e:
+                logging.error("处理FT代币时出错: %s", str(e))
+                break
         else:
             output_index += 1
 
