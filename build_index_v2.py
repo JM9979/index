@@ -132,8 +132,8 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
         logging.error("Error decoding Collection tape %s", decode_txid)
         return output_index + 1, None
         
-    collection_name = collection_tape_json.get("collectionName", "")
-    collection_symbol = collection_tape_json.get("symbol", "")
+    collection_name = collection_tape_json.get("collectionName", "")[:64]
+    collection_symbol = collection_tape_json.get("symbol", "")[:64]
     collection_attributes = collection_tape_json.get("attributes", "")
     collection_description = collection_tape_json.get("description", "")
     collection_supply = collection_tape_json.get("supply", 0)
@@ -293,8 +293,8 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
         # 插入记录到 nft_utxo_set 表
         nft_contract_id = decode_txid
         nft_utxo_id = decode_txid
-        nft_name = nft_tape_json.get("nftName", "")
-        nft_symbol = nft_tape_json.get("symbol", "")
+        nft_name = nft_tape_json.get("nftName", "")[:64]
+        nft_symbol = nft_tape_json.get("symbol", "")[:64]
         nft_attributes = nft_tape_json.get("attributes", "")
         nft_description = nft_tape_json.get("description", "")
         nft_transfer_time_count = 0
@@ -410,9 +410,9 @@ async def process_ft_tokens(conn, decode_tx, output_index, timestamp):
         ft_decimal = int(tape_parts[3])
         ft_tape_info = decode_tx["vout"][output_index + 1]["scriptPubKey"]["hex"][106:-12]
         ft_name_len = int(ft_tape_info[0:2], 16)
-        ft_name = bytes.fromhex(ft_tape_info[2:2+ft_name_len*2]).decode('utf-8')
+        ft_name = bytes.fromhex(ft_tape_info[2:2+ft_name_len*2]).decode('utf-8')[:64]
         ft_symbol_len = int(ft_tape_info[2+ft_name_len*2:4+ft_name_len*2], 16)
-        ft_symbol = bytes.fromhex(ft_tape_info[4+ft_name_len*2:4+ft_name_len*2+ft_symbol_len*2]).decode('utf-8')
+        ft_symbol = bytes.fromhex(ft_tape_info[4+ft_name_len*2:4+ft_name_len*2+ft_symbol_len*2]).decode('utf-8')[:64]
         
         # 插入记录到 ft_tokens 表
         ft_token_insert_query = """
@@ -728,10 +728,10 @@ async def process_transaction_record(conn, decode_tx, block_height, timestamp, t
     fee_str = f"{fee:f}".rstrip('0').rstrip('.')
     
     # 格式化时间
-    utc_time = "unconfirmed" if block_height < 1 else datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    transaction_utc_time = "unconfirmed" if block_height < 1 else datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     
     # 更新数据库
-    await update_transaction_tables(conn, decode_txid, fee_str, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers)
+    await update_transaction_tables(conn, decode_txid, fee_str, timestamp, transaction_utc_time, tx_type, block_height, balance_changes, senders, receivers)
 
 
 def determine_tx_type(decode_tx):
@@ -763,7 +763,7 @@ def determine_tx_type(decode_tx):
     return tx_type
 
 
-async def update_transaction_tables(conn, tx_hash, fee, timestamp, utc_time, tx_type, block_height, balance_changes, senders, receivers):
+async def update_transaction_tables(conn, tx_hash, fee, timestamp, transaction_utc_time, tx_type, block_height, balance_changes, senders, receivers):
     """
     更新交易相关数据表
     
@@ -771,7 +771,7 @@ async def update_transaction_tables(conn, tx_hash, fee, timestamp, utc_time, tx_
         tx_hash: 交易哈希
         fee: 手续费
         timestamp: 时间戳
-        utc_time: UTC时间
+        transaction_utc_time: UTC时间
         tx_type: 交易类型
         block_height: 区块高度
         balance_changes: 余额变化字典
@@ -780,18 +780,18 @@ async def update_transaction_tables(conn, tx_hash, fee, timestamp, utc_time, tx_
     """
     # 1. 存储交易基本信息
     transactions_insert_query = """
-    INSERT INTO transactions (tx_hash, fee, time_stamp, utc_time, tx_type, block_height)
+    INSERT INTO transactions (tx_hash, fee, time_stamp, transaction_utc_time, tx_type, block_height)
     VALUES (%s, %s, %s, %s, %s, %s) AS new
     ON DUPLICATE KEY UPDATE
         fee = new.fee,
         time_stamp = new.time_stamp,
-        utc_time = new.utc_time,
+        transaction_utc_time = new.transaction_utc_time,
         tx_type = new.tx_type,
         block_height = new.block_height,
         updated_at = CURRENT_TIMESTAMP
     """
     await DBManager.execute_update_nocommit(conn, transactions_insert_query, (
-        tx_hash, fee, timestamp, utc_time, tx_type, block_height
+        tx_hash, fee, timestamp, transaction_utc_time, tx_type, block_height
     ))
     
     # 2. 处理地址交易关系
