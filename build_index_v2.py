@@ -490,7 +490,7 @@ async def scan_chain_and_build_index():
                                     WHERE ft_holder_combine_script = %s 
                                     AND ft_contract_id = %s 
                                     """
-                                    await DBManager.execute_update(conn, ft_balance_delete_query, (ft_holder_combine_script, ft_contract_id))
+                                    await DBManager.execute_update(ft_balance_delete_query, (ft_holder_combine_script, ft_contract_id))
                                     ft_tokens_update = """
                                     UPDATE ft_tokens
                                     SET ft_holders_count = ft_holders_count - 1
