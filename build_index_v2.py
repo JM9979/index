@@ -114,7 +114,9 @@ async def process_nft_collections(conn, decode_tx, output_index, timestamp):
     
     if not (decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("0 OP_RETURN") or 
             decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("OP_RETURN")):
-        return output_index, None
+        error_msg = f"Error Collection Protocol: invalid script for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
         
     logging.info("TBC721 Collection:      %s", decode_txid)
 
@@ -212,7 +214,9 @@ async def process_nft_utxo_set(conn, decode_tx, output_index, timestamp):
     
     if not (decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("1 OP_PICK 3 OP_SPLIT") or 
             decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("4 OP_PICK OP_BIN2NUM OP_TOALTSTACK 1 OP_PICK 3 OP_SPLIT")):
-        return output_index, None
+        error_msg = f"Error NFT Protocol: invalid script for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
     
     nft_tape_json = {}
     
@@ -397,7 +401,9 @@ async def process_ft_tokens(conn, decode_tx, output_index, timestamp):
     decode_txid = decode_tx["txid"]
     
     if not decode_tx["vout"][output_index]["scriptPubKey"]["asm"].startswith("9 OP_PICK OP_TOALTSTACK"):
-        return output_index + 1, None, None, None
+        error_msg = f"Error FT Protocol: invalid script for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
     
     if len(decode_tx["vout"]) - output_index <= 1:
         error_msg = f"Error FT Protocol: insufficient outputs for {decode_txid}"
@@ -406,7 +412,9 @@ async def process_ft_tokens(conn, decode_tx, output_index, timestamp):
 
     # 排除错误版本的 TBC20
     if decode_tx["vout"][output_index]["scriptPubKey"]["asm"][-32:-11] == "OP_CHECKSIG OP_RETURN":
-        return output_index + 1, None, None, None
+        error_msg = f"Error FT Protocol: invalid script for {decode_txid}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
     
     vout_combine_script = decode_tx["vout"][output_index]["scriptPubKey"]["hex"][-54:-12]
     ft_balance = 0
