@@ -1,0 +1,72 @@
+source .venv/bin/activate && python3 build_index_v2.py
+# 重定向到日志文件
+python3 build_index_v2.py > v00004.log 2>&1
+
+# MySQL事物隔离级别
+可重复读
++-------------------------+
+| @@transaction_isolation |
++-------------------------+
+| REPEATABLE-READ         |
+
+
+2025-05-20 18:09:51,131 - ERROR - 构建高度: 863704 发生异常, 错误信息: (1062, "Duplicate entry '2158ccfe3dc673b74e67c1ffd77842fd8bc4361c00-49eb2815c6d50e523a335' for key 'ft_balance.PRIMARY'")
+Traceback (most recent call last):
+  File "/home/ubuntu/TBC-API/build_index_v2.py", line 434, in scan_chain_and_build_index
+    await DBManager.execute_update_nocommit(conn, ft_balance_insert_query, (vout_combine_script, ft_contract_id, ft_balance))
+  File "/home/ubuntu/TBC-API/app/dependencies.py", line 118, in execute_update_nocommit
+    await cur.execute(query, params or ())
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/aiomysql/cursors.py", line 239, in execute
+    await self._query(query)
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/aiomysql/cursors.py", line 457, in _query
+    await conn.query(q)
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/aiomysql/connection.py", line 469, in query
+    await self._read_query_result(unbuffered=unbuffered)
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/aiomysql/connection.py", line 683, in _read_query_result
+    await result.read()
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/aiomysql/connection.py", line 1164, in read
+    first_packet = await self.connection._read_packet()
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/aiomysql/connection.py", line 652, in _read_packet
+    packet.raise_for_error()
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/pymysql/protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "/home/ubuntu/TBC-API/.venv/lib/python3.11/site-packages/pymysql/err.py", line 150, in raise_mysql_exception
+    raise errorclass(errno, errval)
+pymysql.err.IntegrityError: (1062, "Duplicate entry '2158ccfe3dc673b74e67c1ffd77842fd8bc4361c00-49eb2815c6d50e523a335' for key 'ft_balance.PRIMARY'")
+
+
+
+从日志来看，这是一个典型的事务隔离级别导致的并发问题。尽管操作发生在同一个事务内，但问题出在：
+
+1. **并发读-写冲突**：
+   - 代码先检查 `ft_balance` 表中是否存在某记录：
+     ```sql
+     SELECT ft_balance FROM ft_balance WHERE ft_contract_id = %s and ft_holder_combine_script = %s
+     ```
+   - 检查结果为空，所以尝试插入记录
+   - 但在这两步操作之间，可能另一个事务已经插入了相同的记录并提交
+
+2. **幻读问题**：
+   - 这是典型的"幻读"现象 - 事务A查询不到某记录，决定插入
+   - 插入时发现该记录已被另一个事务B创建
+   - 在READ COMMITTED或REPEATABLE READ隔离级别下会发生
+
+3. **解决方案**：
+   - 使用 `INSERT ... ON DUPLICATE KEY UPDATE` 替代分开的"检查+插入"步骤
+   - 提高事务隔离级别到SERIALIZABLE (但会降低并发性能)
+   - 使用悲观锁：`SELECT ... FOR UPDATE` 锁定要操作的行
+   - 使用"UPSERT"模式设计更新逻辑
+   
+4. **简单修改方案**：
+   ```sql
+   INSERT INTO ft_balance (ft_holder_combine_script, ft_contract_id, ft_balance)
+   VALUES (%s, %s, %s)
+   ON DUPLICATE KEY UPDATE
+       ft_balance = ft_balance + VALUES(ft_balance)
+   ```
+
+这种现象表明，即使在"同一个事务"中，如果查询和更新操作之间有时间间隔，其他事务的提交可能导致数据状态变化，从而引发冲突。这是数据库事务并发控制中的经典问题。
+
+
+外键约束
