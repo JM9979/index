@@ -709,7 +709,7 @@ async def process_single_transaction(tx, block_height, timestamp):
         tx_analysis = await analyze_transaction_data(decode_tx)
         
         # 处理交易历史记录
-        # await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+        await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
         
         # 处理代币相关UTXO
         await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
@@ -859,12 +859,12 @@ async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, 
     """
     # 1. 存储交易基本信息
     transactions_insert_query = """
-    INSERT INTO transactions (tx_hash, fee, time_stamp, utc_time, tx_type, block_height)
+    INSERT INTO transactions (tx_hash, fee, time_stamp, transaction_utc_time, tx_type, block_height)
     VALUES (%s, %s, %s, %s, %s, %s) AS new
     ON DUPLICATE KEY UPDATE
         fee = new.fee,
         time_stamp = new.time_stamp,
-        utc_time = new.utc_time,
+        transaction_utc_time = new.transaction_utc_time,
         tx_type = new.tx_type,
         block_height = new.block_height,
         updated_at = CURRENT_TIMESTAMP
@@ -980,7 +980,7 @@ async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
         else:
             output_index += 1
     
-    # 第二阶段：统一处理所有输入（和旧版本逻辑一致）
+    # 第二阶段：统一处理所有输入
     try:
         spent_utxo_info_list = await process_ft_inputs(decode_tx)
         if spent_utxo_info_list:
