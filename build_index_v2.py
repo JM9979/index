@@ -480,11 +480,11 @@ async def process_ft_tokens(decode_tx, output_index, timestamp):
 
 
 async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance):
-    """处理同质化代币UTXO并更新ft_txo_set表"""
+    """处理同质化代币UTXO并更新ft_txo_set表（仅处理当前输出）"""
     decode_txid = decode_tx["txid"]
     
     if ft_contract_id is None:
-        return [], False
+        return False
     
     vout_utxo_balance = round(decode_tx["vout"][output_index - 2]["value"] * 1_000_000)
     if_spend = 0
@@ -504,9 +504,13 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
         await DBManager.execute_update(ft_utxo_set_insert_query, (decode_txid, output_index - 2, vout_combine_script, ft_contract_id, vout_utxo_balance, ft_balance, if_spend))
     except Exception as e:
         logging.error("Error inserting FT TXO set %s: %s", decode_txid, e)
-        return [], True
+        return True
     
-    # 收集所有已花费的UTXO信息
+    return False
+
+
+async def process_ft_inputs(decode_tx):
+    """处理交易的所有FT输入，更新已花费的UTXO并返回已花费的UTXO信息"""
     spent_utxo_info_list = []
     
     # 更新已花费的 UTXO
@@ -534,13 +538,65 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
                     logging.warning("Invalid ft_txo_query_res format for %s: %s", vin["txid"], ft_txo_query_res)
             except Exception as e:
                 logging.error("Error updating spent UTXO %s: %s", vin["txid"], e)
-                return [], True
+                return []
     
-    return spent_utxo_info_list, False
+    return spent_utxo_info_list
 
 
-async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info_list=None):
-    """处理同质化代币余额并更新ft_balance表"""
+async def process_spent_ft_balances(spent_utxo_info_list):
+    """处理已花费的FT UTXO对应的余额更新"""
+    if not spent_utxo_info_list or not isinstance(spent_utxo_info_list, list) or len(spent_utxo_info_list) == 0:
+        return False
+        
+    for spent_utxo_info in spent_utxo_info_list:
+        if not spent_utxo_info or len(spent_utxo_info) != 3:
+            logging.warning("Invalid spent_utxo_info format: %s", spent_utxo_info)
+            continue
+            
+        spent_ft_contract_id, spent_holder_script, spent_ft_balance = spent_utxo_info
+        
+        ft_balance_query = """
+        SELECT ft_balance
+        FROM ft_balance
+        WHERE ft_contract_id = %s AND ft_holder_combine_script = %s
+        """
+        try:
+            ft_balance_query_res = await DBManager.execute_query(ft_balance_query, (spent_ft_contract_id, spent_holder_script))
+            
+            if ft_balance_query_res:
+                ft_balance_balance = ft_balance_query_res[0][0]
+                # 如果 ft_balance.ft_balance 等于 ft_balance，删除记录并且 ft_tokens.ft_holders_count - 1
+                if ft_balance_balance == spent_ft_balance:
+                    ft_balance_delete_query = """
+                    DELETE FROM ft_balance 
+                    WHERE ft_holder_combine_script = %s 
+                    AND ft_contract_id = %s 
+                    """
+                    await DBManager.execute_update(ft_balance_delete_query, (spent_holder_script, spent_ft_contract_id))
+                    
+                    ft_tokens_update = """
+                    UPDATE ft_tokens
+                    SET ft_holders_count = ft_holders_count - 1
+                    WHERE ft_contract_id = %s
+                    """
+                    await DBManager.execute_update(ft_tokens_update, (spent_ft_contract_id,))
+                elif ft_balance_balance > spent_ft_balance:
+                    ft_balance_update_query = """
+                    UPDATE ft_balance
+                    SET ft_balance = ft_balance - %s
+                    WHERE ft_holder_combine_script = %s 
+                    AND ft_contract_id = %s 
+                    """                            
+                    await DBManager.execute_update(ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
+        except Exception as e:
+            logging.error("Error updating spent FT balance %s: %s", spent_ft_contract_id, e)
+            return True
+    
+    return False
+
+
+async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance):
+    """处理同质化代币余额并更新ft_balance表（仅处理输出余额增加）"""
     if ft_contract_id is None:
         return False
     
@@ -575,52 +631,6 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, sp
     except Exception as e:
         logging.error("Error updating FT balance %s: %s", ft_contract_id, e)
         return True
-    
-    # 处理所有已花费的UTXO对应的余额
-    if spent_utxo_info_list and isinstance(spent_utxo_info_list, list) and len(spent_utxo_info_list) > 0:
-        for spent_utxo_info in spent_utxo_info_list:
-            if not spent_utxo_info or len(spent_utxo_info) != 3:
-                logging.warning("Invalid spent_utxo_info format: %s", spent_utxo_info)
-                continue
-                
-            spent_ft_contract_id, spent_holder_script, spent_ft_balance = spent_utxo_info
-            
-            ft_balance_query = """
-            SELECT ft_balance
-            FROM ft_balance
-            WHERE ft_contract_id = %s AND ft_holder_combine_script = %s
-            """
-            try:
-                ft_balance_query_res = await DBManager.execute_query(ft_balance_query, (spent_ft_contract_id, spent_holder_script))
-                
-                if ft_balance_query_res:
-                    ft_balance_balance = ft_balance_query_res[0][0]
-                    # 如果 ft_balance.ft_balance 等于 ft_balance，删除记录并且 ft_tokens.ft_holders_count - 1
-                    if ft_balance_balance == spent_ft_balance:
-                        ft_balance_delete_query = """
-                        DELETE FROM ft_balance 
-                        WHERE ft_holder_combine_script = %s 
-                        AND ft_contract_id = %s 
-                        """
-                        await DBManager.execute_update(ft_balance_delete_query, (spent_holder_script, spent_ft_contract_id))
-                        
-                        ft_tokens_update = """
-                        UPDATE ft_tokens
-                        SET ft_holders_count = ft_holders_count - 1
-                        WHERE ft_contract_id = %s
-                        """
-                        await DBManager.execute_update(ft_tokens_update, (spent_ft_contract_id,))
-                    elif ft_balance_balance > spent_ft_balance:
-                        ft_balance_update_query = """
-                        UPDATE ft_balance
-                        SET ft_balance = ft_balance - %s
-                        WHERE ft_holder_combine_script = %s 
-                        AND ft_contract_id = %s 
-                        """                            
-                        await DBManager.execute_update(ft_balance_update_query, (spent_ft_balance, spent_holder_script, spent_ft_contract_id))
-            except Exception as e:
-                logging.error("Error updating spent FT balance %s: %s", spent_ft_contract_id, e)
-                return True
     
     return False
 
@@ -917,6 +927,7 @@ async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
     """
     output_index = 0
     
+    # 第一阶段：处理所有输出
     while output_index < len(decode_tx["vout"]):
         if output_index >= len(decode_tx["vout"]):
             break
@@ -953,14 +964,14 @@ async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
                 break
             output_index = new_output_index
             
-            # 处理FT代币的UTXO集合
-            spent_utxo_info_list, should_break = await process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
+            # 处理FT代币的UTXO记录（仅输出）
+            should_break = await process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combine_script, ft_balance)
             if should_break:
                 break
             
-            # 处理FT代币余额
+            # 处理FT代币余额（仅输出增加）
             if ft_contract_id is not None and vout_combine_script is not None and ft_balance is not None:
-                should_break = await process_ft_balance(ft_contract_id, vout_combine_script, ft_balance, spent_utxo_info_list)
+                should_break = await process_ft_balance(ft_contract_id, vout_combine_script, ft_balance)
                 if should_break:
                     break
             else:
@@ -968,6 +979,14 @@ async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
                                ft_contract_id, vout_combine_script, ft_balance)
         else:
             output_index += 1
+    
+    # 第二阶段：统一处理所有输入（和旧版本逻辑一致）
+    try:
+        spent_utxo_info_list = await process_ft_inputs(decode_tx)
+        if spent_utxo_info_list:
+            await process_spent_ft_balances(spent_utxo_info_list)
+    except Exception as e:
+        logging.error("Error processing FT inputs for transaction %s: %s", decode_tx["txid"], e)
 
 
 async def check_block_height():
