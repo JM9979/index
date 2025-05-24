@@ -822,7 +822,6 @@ async def process_transaction_record(decode_tx, block_height, timestamp, tx_type
                     if_type_detected = True
                     tx_type = "P2MS"
                 try:
-                    from app.utils import convert_p2ms_script_to_ms_address
                     ms_address = convert_p2ms_script_to_ms_address(script_asm)
                     receivers.add(ms_address)
                     balance_changes[ms_address] = balance_changes.get(ms_address, 0) + value_get
