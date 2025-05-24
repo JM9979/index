@@ -6,7 +6,7 @@ import base64
 import tempfile
 from app.dependencies import call_node_rpc
 from app.dependencies import DBManager
-from app.utils import hex_to_json, convert_str_to_sha256
+from app.utils import hex_to_json, convert_str_to_sha256, convert_p2ms_script_to_ms_address
 from app.s3 import S3Uploader
 from datetime import datetime, timezone
 
@@ -19,6 +19,10 @@ index_interval = 0
 mempool = []
 last_mempool = []
 s3_uploader = S3Uploader()  # 初始化S3上传器
+
+# 并发处理配置
+CONCURRENT_LIMIT = 50  # 同时处理的交易数量，可以根据机器性能调整
+tx_semaphore = None  # 全局信号量，将在运行时初始化
 
 def upload_base64_image_to_s3(image_data, object_name, content_type='image/jpeg'):
     """
@@ -82,6 +86,10 @@ def schedule_task(task):
     Schedule task.
     """
     async def wrapper():
+        global tx_semaphore
+        # 初始化信号量
+        tx_semaphore = asyncio.Semaphore(CONCURRENT_LIMIT)
+        
         await DBManager.init_pool(db="TBC20721")
 
         # clear db
@@ -723,6 +731,22 @@ async def process_single_transaction(tx, block_height, timestamp):
         return False
 
 
+async def process_single_transaction_with_semaphore(tx, block_height, timestamp):
+    """
+    使用信号量控制并发的交易处理函数
+    
+    Args:
+        tx: 交易哈希
+        block_height: 区块高度
+        timestamp: 时间戳
+        
+    Returns:
+        bool: 处理是否成功
+    """
+    async with tx_semaphore:
+        return await process_single_transaction(tx, block_height, timestamp)
+
+
 def is_in_blacklist(txid):
     """检查交易ID是否在黑名单中"""
     try:
@@ -830,7 +854,6 @@ async def process_transaction_record(decode_tx, block_height, timestamp, tx_type
                     # P2MS 多重签名处理
                     elif vin_script_asm.endswith("OP_CHECKMULTISIG"):
                         try:
-                            from app.utils import convert_p2ms_script_to_ms_address
                             ms_address = convert_p2ms_script_to_ms_address(vin_script_asm)
                             senders.add(ms_address)
                             balance_changes[ms_address] = balance_changes.get(ms_address, 0) - value_spend
@@ -1167,7 +1190,7 @@ def find_new_transactions(current_mempool):
 
 async def process_transactions(new_txs, if_catch_lastest, timestamp):
     """
-    处理新交易
+    并发处理新交易
     
     Args:
         new_txs: 新交易列表
@@ -1177,10 +1200,40 @@ async def process_transactions(new_txs, if_catch_lastest, timestamp):
     global mempool
     global index_height
     
+    if not new_txs:
+        return
+    
+    # 准备并发任务
+    tasks = []
     for tx in new_txs:
         mempool.append(tx)
         block_height = index_height if not if_catch_lastest else -1
-        await process_single_transaction(tx, block_height, timestamp)
+        task = asyncio.create_task(
+            process_single_transaction_with_semaphore(tx, block_height, timestamp)
+        )
+        tasks.append(task)
+    
+    # 并发执行所有交易处理任务
+    logging.info("开始并发处理 %d 个交易，并发限制: %d", len(new_txs), CONCURRENT_LIMIT)
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 统计处理结果
+        success_count = 0
+        error_count = 0
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logging.error("交易 %s 处理失败: %s", new_txs[i], str(result))
+                error_count += 1
+            elif result:
+                success_count += 1
+            else:
+                error_count += 1
+        
+        logging.info("交易处理完成 - 成功: %d, 失败: %d", success_count, error_count)
+        
+    except Exception as e:
+        logging.error("并发处理交易时出错: %s", str(e))
 
 
 def update_mempool_state(if_catch_lastest):
