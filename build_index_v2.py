@@ -10,7 +10,7 @@ from app.db.ft import process_ft_txo_set, process_ft_balance, process_ft_inputs,
 from app.db.transaction import process_transaction_record
 
 # Configure logging
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 定义并初始化全局变量
 index_height = 862600
