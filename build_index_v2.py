@@ -92,6 +92,9 @@ def schedule_task(task):
         TRUNCATE TABLE `ft_txo_set`;
         TRUNCATE TABLE `nft_collections`;
         TRUNCATE TABLE `nft_utxo_set`;
+        TRUNCATE TABLE `transactions`;
+        TRUNCATE TABLE `address_transactions`;
+        TRUNCATE TABLE `transaction_participants`;
         SET FOREIGN_KEY_CHECKS = 1;
         """
         await DBManager.execute_update(clear_db_query)

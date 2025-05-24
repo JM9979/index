@@ -2,6 +2,16 @@ source .venv/bin/activate && python3 build_index_v2.py
 # 重定向到日志文件
 python3 build_index_v2.py > v00004.log 2>&1
 
+# 激活虚拟环境并后台运行
+source venv/bin/activate
+nohup python build_index_v2.py > indexer.log 2>&1 &
+
+# 查看日志
+tail -f indexer.log
+
+# 停止程序
+pkill -f build_index_v2.py
+
 # MySQL事物隔离级别
 可重复读
 +-------------------------+

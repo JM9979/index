@@ -6,3 +6,5 @@
 /venv
 v00004.log
 origin.log
+*.log
+*.out
