@@ -1,5 +1,4 @@
 import asyncio
-import json
 import time
 import logging
 
@@ -15,7 +14,6 @@ from app.db.transaction import process_transaction_record
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-first_index_height = 862600
 # 定义并初始化全局变量
 index_height = 862600
 index_interval = 0
@@ -55,6 +53,9 @@ def schedule_task(task):
             
         await DBManager.close_pool()
     asyncio.run(wrapper())
+
+
+
 
 
 async def analyze_transaction_data(decode_tx):
@@ -144,6 +145,8 @@ def is_in_blacklist(txid):
     except FileNotFoundError:
         return False
 
+
+
 def determine_tx_type(decode_tx):
     """
     确定交易类型
@@ -172,7 +175,9 @@ def determine_tx_type(decode_tx):
             
     return tx_type
 
-async def process_tx_utxos(conn, decode_tx, timestamp, utxo_types=None):
+
+
+async def process_tx_utxos(decode_tx, timestamp, utxo_types=None):
     """
     处理交易中的各种UTXO（FT/NFT等）
     
@@ -310,7 +315,7 @@ def find_new_transactions(current_mempool):
     return new_txs
 
 
-async def process_transactions(conn, new_txs, if_catch_lastest, timestamp):
+async def process_transactions(new_txs, if_catch_lastest, timestamp):
     """
     处理新交易
     
@@ -325,11 +330,7 @@ async def process_transactions(conn, new_txs, if_catch_lastest, timestamp):
     for tx in new_txs:
         mempool.append(tx)
         block_height = index_height if not if_catch_lastest else -1
-        success = await process_single_transaction(conn, tx, block_height, timestamp)
-        if not success:
-            # raise Exception(f"处理交易 {tx} 失败")
-            logging.error("处理交易 %s 失败", tx, exc_info=True)
-    logging.info("处理新交易完成, 新交易数量: %s", len(new_txs))
+        await process_single_transaction(tx, block_height, timestamp)
 
 
 def update_mempool_state(if_catch_lastest):
@@ -347,46 +348,7 @@ def update_mempool_state(if_catch_lastest):
         index_height += 1
         last_mempool = mempool
         mempool = []
-    logging.info("update_mempool_state: %s||%s||%s", index_height, mempool, last_mempool)
 
-# 该方法在处理完毕某一height的tx后调用；所以，如果当前没有追赶到最新状态，在保存时需要把height + 1
-async def save_build_status(conn, height, tx_pool, last_tx_pool):
-    """保存构建状态"""
-    sql = """
-    UPDATE t_index_build_status 
-    SET value = %s
-    WHERE name = %s
-    """
-    tx_pool_json = json.dumps(tx_pool)
-    last_tx_pool_json = json.dumps(last_tx_pool)
-    await DBManager.execute_update_nocommit(conn, sql, (height, "index_height"))
-    await DBManager.execute_update_nocommit(conn, sql, (tx_pool_json, "mempool"))
-    await DBManager.execute_update_nocommit(conn, sql, (last_tx_pool_json, "last_mempool"))
-
-    return
-
-async def load_build_status():
-    """加载构建状态"""
-    sql = """
-    SELECT value FROM t_index_build_status WHERE name = %s
-    """
-    index_height_res = await DBManager.execute_query(sql, ("index_height",))
-    if int(index_height_res[0][0]) < first_index_height:
-        raise Exception(f"数据库存储的构建状态异常, 数据库中索引高度为 {index_height_res[0][0]}")
-    mempool_res = await DBManager.execute_query(sql, ("mempool",))
-    last_mempool_res = await DBManager.execute_query(sql, ("last_mempool",))
-    return int(index_height_res[0][0]), json.loads(mempool_res[0][0]), json.loads(last_mempool_res[0][0])
-
-async def reset_build_status(conn):
-    """重置构建状态"""
-    sql = """
-    UPDATE t_index_build_status 
-    SET value = %s
-    WHERE name = %s
-    """
-    await DBManager.execute_update_nocommit(conn, sql, (json.dumps([]), "mempool"))
-    await DBManager.execute_update_nocommit(conn, sql, (json.dumps([]), "last_mempool"))
-    await DBManager.execute_update_nocommit(conn, sql, (first_index_height, "index_height"))
 
 async def scan_chain_and_build_index():
     """
@@ -398,99 +360,28 @@ async def scan_chain_and_build_index():
         
         # 获取当前内存池和时间戳
         current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
+        
         # 找出新交易
         new_txs = find_new_transactions(current_mempool)
-        logging.info("current_mempool: %s||mempool: %s||last_mempool: %s", current_mempool, mempool, last_mempool)
-        logging.info("new_txs: %s", new_txs)
-        async with DBManager._pool.acquire() as conn:
-            await conn.begin()
-            try:
-                # 处理新交易
-                await process_transactions(conn, new_txs, if_catch_lastest, timestamp)
-                
-                # 更新内存池状态
-                update_mempool_state(if_catch_lastest)
-
-                await save_build_status(conn, index_height, mempool, last_mempool)
-            except Exception as e:
-                await conn.rollback()
-                logging.error("构建高度: %s 发生回滚, 错误信息: %s", index_height, str(e))
-                raise e
-            else:
-                await conn.commit()
-                logging.info("构建高度: %s 构建成功", index_height)
+        
+        # 处理新交易
+        await process_transactions(new_txs, if_catch_lastest, timestamp)
+        
+        # 更新内存池状态
+        update_mempool_state(if_catch_lastest)
         
         return True
     except Exception as e:
-        logging.error("P0 扫描区块链出错: %s", str(e))
+        logging.error("扫描区块链出错: %s", str(e))
         return False
 
-async def clear_db():
-    """
-    清空数据库
-    """
-    clear_db_query = """
-    SET FOREIGN_KEY_CHECKS = 0;
-    TRUNCATE TABLE `ft_tokens`;
-    TRUNCATE TABLE `ft_balance`;
-    TRUNCATE TABLE `ft_txo_set`;
-    TRUNCATE TABLE `nft_collections`;
-    TRUNCATE TABLE `nft_utxo_set`;
-    TRUNCATE TABLE `address_transactions`;
-    TRUNCATE TABLE `transactions`;
-    TRUNCATE TABLE `transaction_participants`;
-    SET FOREIGN_KEY_CHECKS = 1;
-    """
-    async with DBManager._pool.acquire() as conn:
-        await DBManager.execute_update_nocommit(conn, clear_db_query)
-        await reset_build_status(conn) # 重置构建状态
-        await conn.commit()
-
-def schedule_task(task, is_clear_db=False):
-    """
-    Schedule task.
-    """
-    async def wrapper():
-        await DBManager.init_pool(db="TBC20721")
-
-        if is_clear_db:
-            await clear_db()
-            logging.info("清空数据库成功，开始从头构建索引")
-        else:
-            global index_height
-            global mempool
-            global last_mempool
-            index_height, mempool, last_mempool = await load_build_status() # 加载构建状态
-            logging.info("加载构建状态成功, 从索引高度为 %s 开始构建, mempool 长度为 %s, last_mempool 长度为 %s", index_height, len(mempool), len(last_mempool))
-
-        while True:
-            try:
-                global index_interval
-                await task()
-                await asyncio.sleep(index_interval)
-            except KeyboardInterrupt:
-                logging.info("Interrupted by user")
-                break
-            except Exception as e:
-                logging.error("P0 Uncatched Error: %s", str(e))
-                await asyncio.sleep(10)
-            
-        await DBManager.close_pool()
-    asyncio.run(wrapper())
-
-
-async def task_wrapper():
-    """
-    Task wrapper.
-    """
-    
-    # 正常的区块链扫描任务
-    await scan_chain_and_build_index()
 
 if __name__ == "__main__":
-    
-    # 定义全局变量
-    last_cleanup_date = None
-    
-    # 每 15 秒调用一次 task_wrapper，传入命令行参数
+    async def task_wrapper():
+        """
+        Task wrapper.
+        """
+        await scan_chain_and_build_index()
+
+    # 每 15 秒调用一次 task_wrapper
     schedule_task(task_wrapper)
