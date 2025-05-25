@@ -4,6 +4,10 @@ import logging
 from urllib.parse import urlparse
 from app.config import config
 
+import base64
+import os
+import tempfile
+
 class S3Uploader:
     def __init__(self, aws_access_key_id=None, aws_secret_access_key=None, region_name=None):
         """
@@ -176,6 +180,67 @@ class S3Uploader:
         except ClientError as e:
             self.logger.error(f"获取桶位置时出错: {e.response['Error']['Message']}")
             return None
+
+
+
+s3_uploader = S3Uploader()
+
+def upload_base64_image_to_s3(image_data, object_name, content_type='image/jpeg'):
+    """
+    上传base64编码的图片到S3存储
+    
+    Args:
+        image_data: base64编码的图片数据，格式如"data:image/jpeg;base64,/9j/4AAQSkZ..."
+        object_name: S3中的对象名称，如"collections/xyz.jpg"
+        content_type: 文件的内容类型，默认为'image/jpeg'
+        
+    Returns:
+        tuple: (success, result)
+            - success: 布尔值，表示上传是否成功
+            - result: 成功时为图片URL，失败时为原始图片数据
+    """
+    if not image_data.startswith('data:image'):
+        return False, image_data
+    
+    try:
+        # 先检查S3上是否已经存在该对象
+        if s3_uploader.check_object_exists(object_name):
+            # 对象已存在，直接获取URL
+            image_url = s3_uploader.get_public_url(object_name=object_name)
+            logging.info("Image already exists in S3, reusing: %s", image_url)
+            return True, image_url
+            
+        # 如果不存在，则进行上传
+        # 解析Base64图片数据
+        image_data_encoded = image_data.split(',')[1]
+        image_bytes = base64.b64decode(image_data_encoded)
+        
+        # 创建临时文件保存图片
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            temp_file_path = temp_file.name
+            temp_file.write(image_bytes)
+        
+        # 上传到S3
+        success, _ = s3_uploader.upload_image(
+            file_path=temp_file_path,
+            object_name=object_name,
+            content_type=content_type
+        )
+        
+        # 删除临时文件
+        os.unlink(temp_file_path)
+        
+        if success:
+            # 获取公共URL
+            image_url = s3_uploader.get_public_url(object_name=object_name)
+            logging.info("Image uploaded to S3: %s", image_url)
+            return True, image_url
+        else:
+            return False, image_data
+            
+    except Exception as e:
+        logging.error("Error uploading image to S3: %s", str(e))
+        return False, image_data
 
 
 # 使用示例

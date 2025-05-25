@@ -2,3 +2,10 @@
 /app/__pycache__
 .DS_Store
 /.devcontainer
+/app/config.py
+/venv
+v00004.log
+origin.log
+*.log
+*.out
+/app/db/__pycache__

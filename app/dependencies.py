@@ -4,6 +4,8 @@ Dependecies for FastAPI
 import aiohttp
 from app.config import config
 import aiomysql
+import logging
+import asyncio
 
 async def call_node_rpc(method: str, params: list, if_full_response=False):
     """
@@ -31,6 +33,20 @@ async def call_node_rpc(method: str, params: list, if_full_response=False):
                 return result
     except Exception as e:
         raise ConnectionError(f"Failed to call node RPC {method}: {str(e)}") from e
+
+
+async def syclic_call_rpc(method, params):
+    """
+    Syclic call RPC.
+    """
+    retry_interval = 5
+    while True:
+        try:
+            res = await call_node_rpc(method=method, params=params)
+            return res
+        except (ConnectionError, TimeoutError, ValueError) as e:
+            logging.error("Error calling node RPC %s: %s. Retrying in %s seconds...", method, e, retry_interval)
+            await asyncio.sleep(retry_interval)
 
 
 class DBManager:
