@@ -505,3 +505,168 @@ if __name__ == "__main__":
 
     # 每 15 秒调用一次 task_wrapper
     schedule_task(task_wrapper)
+
+
+async def get_history(address: str, script: str, as_page: bool = False, page: int = 0):
+    """
+    Get history of an address
+    """
+    history_response = await call_electrumx_rpc(
+        method="blockchain.scripthash.get_history",
+        params=[script]
+    )
+
+    # number of history items
+    history_count = len(history_response)
+
+    # reverse the history_response
+    history_response.reverse()
+    if as_page:
+        start = page * 10
+        end = start + 10
+        needed_items = history_response[start:end]
+    else:
+        needed_items = history_response[:30]
+
+    # Get history details
+    result = []
+    for item in needed_items:
+        balance_change = 0
+        total_spend = 0
+        total_receive = 0
+        txid = item['tx_hash']
+        decode_info = await call_node_rpc(method="getrawtransaction", params=[txid, 1])
+        senders = set()
+        receivers = set()
+        if_type_detected = False
+        tx_type = "P2PKH"
+
+        # Get total receive and receivers
+        for output in decode_info['vout']:
+            value_get = round(float(output['value']) * 1_000_000)
+            total_receive += value_get
+
+            if output["scriptPubKey"]["type"] == "pubkeyhash":
+                for addr in output['scriptPubKey']['addresses']:
+                    receivers.add(addr)
+                    if addr == address:
+                        balance_change += value_get
+
+            elif output["scriptPubKey"]["asm"].startswith("9 OP_PICK OP_TOALTSTACK"):
+                if not if_type_detected:
+                    if_type_detected = True
+                    tx_type = "TBC20"
+                if output["scriptPubKey"]["asm"].endswith("01 32436f6465"):
+                    pool_contract_id =  "Pool_" + output["scriptPubKey"]["asm"][-53:-11]
+                    receivers.add(pool_contract_id)
+
+            elif (output["scriptPubKey"]["asm"].startswith("OP_RETURN") or output["scriptPubKey"]["asm"].startswith("0 OP_RETURN") or output["scriptPubKey"]["asm"].startswith("1 OP_PICK")) and not if_type_detected:
+                if_type_detected = True
+                tx_type = "TBC721"
+            elif output["scriptPubKey"]["asm"].endswith("OP_CHECKMULTISIG") and not if_type_detected:
+                if_type_detected = True
+                tx_type = "P2MS"
+                try:
+                    ms_address = convert_p2ms_script_to_ms_address(output["scriptPubKey"]["asm"])
+                    receivers.add(ms_address)
+                    if ms_address == address:
+                        balance_change += value_get
+                except ValueError:
+                    pass
+
+        # Get total spend and senders
+        for vin in decode_info['vin']:
+            if "txid" not in vin:
+                senders.add("coinbase")
+                total_spend += 325
+            else:
+                vin_txid = vin['txid']
+                vin_vout = vin['vout']
+                vin_decode = await call_node_rpc(method="getrawtransaction", params=[vin_txid, 1])
+                value_spend = round(float(vin_decode['vout'][vin_vout]['value']) * 1_000_000)
+                total_spend += value_spend
+                if vin_decode['vout'][vin_vout]['scriptPubKey']['type'] == "pubkeyhash":
+                    for addr in vin_decode['vout'][vin_vout]['scriptPubKey']['addresses']:
+                        senders.add(addr)
+                        if addr == address:
+                            balance_change -= value_spend
+                elif vin_decode['vout'][vin_vout]['scriptPubKey']['asm'].endswith("OP_CHECKMULTISIG"):
+                    try:
+                        ms_address = convert_p2ms_script_to_ms_address(vin_decode['vout'][vin_vout]['scriptPubKey']['asm'])
+                        senders.add(ms_address)
+                        if ms_address == address:
+                            balance_change -= value_spend
+                    except ValueError:
+                        pass
+                elif vin_decode['vout'][vin_vout]['scriptPubKey']['asm'].startswith("9 OP_PICK OP_TOALTSTACK"):
+                    if vin_decode['vout'][vin_vout]['scriptPubKey']['asm'].endswith("01 32436f6465"):
+                        pool_contract_id = "Pool_" + vin_decode['vout'][vin_vout]['scriptPubKey']['asm'][-53:-11]
+                        senders.add(pool_contract_id)
+
+        # Get a history item
+        recipient_addresses = []
+        sender_addresses = []
+        fee = (total_spend - total_receive) / 1_000_000
+        fee_str = f"{fee:f}".rstrip('0').rstrip('.')
+
+        # remove change address from recipient_addresses
+        if balance_change < 0:
+            sender_addresses.append(address)
+            for add in receivers:
+                if add != address:
+                    recipient_addresses.append(add)
+        elif balance_change >= 0:
+            recipient_addresses.append(address)
+            for add in senders:
+                if add != address:
+                    sender_addresses.append(add)
+        if len(sender_addresses) == 0:
+            sender_addresses.append(address)
+        if len(recipient_addresses) == 0:
+            recipient_addresses.append(address)
+
+        # Get time stamp
+        utc_time = ''
+        time_stamp = None
+        if item['height'] < 1:
+            utc_time = "unconfirmed"
+        else:
+            block_info = await call_node_rpc(method="getblockbyheight", params=[item['height']])
+            time_stamp = block_info['time']
+            utc_time = datetime.fromtimestamp(
+                time_stamp,
+                tz=timezone.utc
+            ).strftime('%Y-%m-%d %H:%M:%S')
+
+        # Format balance change
+        balance_float = balance_change / Decimal(1_000_000)
+        formatted_balance = (
+            f"{balance_float.quantize(Decimal('1.000000'), rounding=ROUND_DOWN):+f}"
+            .rstrip('0')
+            .rstrip('.')
+        )
+        if formatted_balance in ('', '+'):
+            formatted_balance = "0"
+
+        # Append to result
+        result.append({
+            "banlance_change": formatted_balance,
+            "balance_change": formatted_balance,
+            "tx_hash": txid,
+            "sender_addresses": sender_addresses,
+            "recipient_addresses": recipient_addresses,
+            "fee": fee_str,
+            "time_stamp": time_stamp,
+            "utc_time": utc_time,
+            "tx_type": tx_type
+        })
+
+    # sort the result
+    result.sort(
+        key=lambda x: (
+            x['time_stamp'] is None,
+            x['time_stamp'] if x['time_stamp'] is not None else float('inf')
+        ),
+        reverse=True
+    )
+    return history_count, result
