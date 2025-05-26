@@ -1,5 +1,6 @@
 import logging
 from app.dependencies import DBManager
+from app.utils.field_truncate import FieldTruncate
 
 
 async def process_ft_tokens(decode_tx, output_index, timestamp):
@@ -75,6 +76,26 @@ async def process_ft_tokens(decode_tx, output_index, timestamp):
             return output_index, None, None, None, True
         
         # 插入记录到 ft_tokens 表
+        ft_token_data = {
+            'ft_contract_id': ft_contract_id,
+            'ft_code_script': ft_code_script,
+            'ft_tape_script': ft_tape_script,
+            'ft_supply': ft_supply,
+            'ft_decimal': ft_decimal,
+            'ft_name': ft_name,
+            'ft_symbol': ft_symbol,
+            'ft_description': ft_description,
+            'ft_origin_utxo': ft_origin_utxo,
+            'ft_creator_combine_script': ft_creator_combine_script,
+            'ft_holders_count': ft_holders_count,
+            'ft_icon_url': ft_icon_url,
+            'ft_create_timestamp': ft_create_timestamp,
+            'ft_token_price': ft_token_price
+        }
+        
+        # 截断字段
+        ft_token_data = FieldTruncate.truncate_fields(ft_token_data)
+        
         ft_token_insert_query = """
         INSERT INTO ft_tokens (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, 
                             ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price)
@@ -94,7 +115,7 @@ async def process_ft_tokens(decode_tx, output_index, timestamp):
             ft_token_price = new.ft_token_price
         """
         try:
-            await DBManager.execute_update(ft_token_insert_query, (ft_contract_id, ft_code_script, ft_tape_script, ft_supply, ft_decimal, ft_name, ft_symbol, ft_description, ft_origin_utxo, ft_creator_combine_script, ft_holders_count, ft_icon_url, ft_create_timestamp, ft_token_price))
+            await DBManager.execute_update(ft_token_insert_query, tuple(ft_token_data.values()))
         except Exception as e:
             logging.error("Error inserting FT token %s: %s", decode_txid, e)
             return output_index, None, None, None, True
@@ -113,6 +134,19 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
     if_spend = 0
     
     # 插入记录到 ft_txo_set 表
+    ft_txo_data = {
+        'utxo_txid': decode_txid,
+        'utxo_vout': output_index - 2,
+        'ft_holder_combine_script': vout_combine_script,
+        'ft_contract_id': ft_contract_id,
+        'utxo_balance': vout_utxo_balance,
+        'ft_balance': ft_balance,
+        'if_spend': if_spend
+    }
+    
+    # 截断字段
+    ft_txo_data = FieldTruncate.truncate_fields(ft_txo_data)
+    
     ft_utxo_set_insert_query = """
     INSERT INTO ft_txo_set (utxo_txid, utxo_vout, ft_holder_combine_script, ft_contract_id, utxo_balance, ft_balance, if_spend)
     VALUES (%s, %s, %s, %s, %s, %s, %s) AS new
@@ -124,7 +158,7 @@ async def process_ft_txo_set(decode_tx, output_index, ft_contract_id, vout_combi
         if_spend = new.if_spend
     """
     try:
-        await DBManager.execute_update(ft_utxo_set_insert_query, (decode_txid, output_index - 2, vout_combine_script, ft_contract_id, vout_utxo_balance, ft_balance, if_spend))
+        await DBManager.execute_update(ft_utxo_set_insert_query, tuple(ft_txo_data.values()))
     except Exception as e:
         logging.error("Error inserting FT TXO set %s: %s", decode_txid, e)
         return True
@@ -136,6 +170,15 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance):
     """处理同质化代币余额并更新ft_balance表（仅处理输出余额增加）"""
     if ft_contract_id is None:
         return False
+    
+    # 准备数据并截断字段
+    ft_balance_data = {
+        'ft_holder_combine_script': vout_combine_script,
+        'ft_contract_id': ft_contract_id,
+        'ft_balance': ft_balance
+    }
+    
+    ft_balance_data = FieldTruncate.truncate_fields(ft_balance_data)
     
     # 如果 ft_balance 记录不存在，插入记录到 ft_balance 表
     ft_balance_query = """
@@ -149,7 +192,7 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance):
             INSERT INTO ft_balance (ft_holder_combine_script, ft_contract_id, ft_balance)
             VALUES (%s, %s, %s)
             """
-            await DBManager.execute_update(ft_balance_insert_query, (vout_combine_script, ft_contract_id, ft_balance))
+            await DBManager.execute_update(ft_balance_insert_query, tuple(ft_balance_data.values()))
 
             # ft_holders_count 增加
             ft_tokens_update = """
@@ -164,7 +207,7 @@ async def process_ft_balance(ft_contract_id, vout_combine_script, ft_balance):
             SET ft_balance = ft_balance + %s
             WHERE ft_holder_combine_script = %s and ft_contract_id = %s
             """
-            await DBManager.execute_update(ft_balance_update_query, (ft_balance, vout_combine_script, ft_contract_id))
+            await DBManager.execute_update(ft_balance_update_query, tuple(ft_balance_data.values()))
     except Exception as e:
         logging.error("Error updating FT balance %s: %s", ft_contract_id, e)
         return True

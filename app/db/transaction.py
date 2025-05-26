@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from app.dependencies import DBManager
-from app.utils import convert_p2ms_script_to_ms_address
+from app.utils.utils import convert_p2ms_script_to_ms_address
 from app.dependencies import syclic_call_rpc
 
 async def process_transaction_record(decode_tx, block_height, timestamp, tx_type=None):
