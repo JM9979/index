@@ -1,8 +1,7 @@
 import logging
 from app.dependencies import DBManager
-from app.utils.utils import convert_str_to_sha256, hex_to_json
+from app.utils import convert_str_to_sha256, hex_to_json
 from app.s3 import upload_base64_image_to_s3
-from app.utils.field_truncate import FieldTruncate
 
 
 
@@ -87,27 +86,13 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
                 return output_index, None, True
             nft_contract_id = nft_file[:64]
 
-        # 准备 NFT 更新数据
-        nft_update_data = {
-            'nft_utxo_id': decode_txid,
-            'nft_code_balance': nft_code_balance,
-            'nft_p2pkh_balance': nft_p2pkh_balance,
-            'nft_holder_address': nft_holder_address,
-            'nft_holder_script_hash': nft_holder_script_hash,
-            'nft_last_transfer_timestamp': timestamp,
-            'nft_contract_id': nft_contract_id
-        }
-        
-        # 截断字段
-        nft_update_data = FieldTruncate.truncate_fields(nft_update_data)
-
         nft_update_query = """
         UPDATE nft_utxo_set
         SET nft_utxo_id = %s, nft_code_balance = %s, nft_p2pkh_balance = %s, nft_holder_address = %s, nft_holder_script_hash = %s, nft_last_transfer_timestamp = %s, nft_transfer_time_count = nft_transfer_time_count + 1
         WHERE nft_contract_id = %s
         """
         try:
-            await DBManager.execute_update(nft_update_query, tuple(nft_update_data.values()))
+            await DBManager.execute_update(nft_update_query, (decode_txid, nft_code_balance, nft_p2pkh_balance, nft_holder_address, nft_holder_script_hash, timestamp, nft_contract_id))
         except Exception as e:
             logging.error("Error updating NFT transfer %s: %s", decode_txid, e)
             return output_index, None, True
@@ -165,30 +150,6 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
                     logging.error("Error uploading NFT icon to S3: %s", str(e))
                     # 如果上传失败，保留原始数据
         
-        # 准备 NFT 插入数据
-        nft_insert_data = {
-            'nft_contract_id': nft_contract_id,
-            'collection_id': collection_id,
-            'collection_index': collection_index,
-            'collection_name': collection_name,
-            'nft_utxo_id': nft_utxo_id,
-            'nft_code_balance': nft_code_balance,
-            'nft_p2pkh_balance': nft_p2pkh_balance,
-            'nft_name': nft_name,
-            'nft_symbol': nft_symbol,
-            'nft_attributes': nft_attributes,
-            'nft_description': nft_description,
-            'nft_transfer_time_count': nft_transfer_time_count,
-            'nft_holder_address': nft_holder_address,
-            'nft_holder_script_hash': nft_holder_script_hash,
-            'nft_create_timestamp': nft_create_timestamp,
-            'nft_last_transfer_timestamp': nft_last_transfer_timestamp,
-            'nft_icon': nft_icon
-        }
-        
-        # 截断字段
-        nft_insert_data = FieldTruncate.truncate_fields(nft_insert_data)
-        
         nft_utxo_set_insert_query = """
         INSERT INTO nft_utxo_set (nft_contract_id, collection_id, collection_index, collection_name, nft_utxo_id, nft_code_balance, nft_p2pkh_balance, nft_name, nft_symbol, nft_attributes, nft_description, nft_transfer_time_count, nft_holder_address, nft_holder_script_hash, nft_create_timestamp, nft_last_transfer_timestamp, nft_icon)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
@@ -211,7 +172,7 @@ async def process_nft_utxo_set(decode_tx, output_index, timestamp):
             nft_icon = new.nft_icon
         """
         try:
-            await DBManager.execute_update(nft_utxo_set_insert_query, tuple(nft_insert_data.values()))
+            await DBManager.execute_update(nft_utxo_set_insert_query, (nft_contract_id, collection_id, collection_index, collection_name, nft_utxo_id, nft_code_balance, nft_p2pkh_balance, nft_name, nft_symbol, nft_attributes, nft_description, nft_transfer_time_count, nft_holder_address, nft_holder_script_hash, nft_create_timestamp, nft_last_transfer_timestamp, nft_icon))
         except Exception as e:
             logging.error("Error inserting NFT %s: %s", decode_txid, e)
             return output_index, None, True

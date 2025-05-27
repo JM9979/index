@@ -1,8 +1,7 @@
 import logging
 from app.dependencies import DBManager
-from app.utils.utils import convert_str_to_sha256, hex_to_json
+from app.utils import convert_str_to_sha256, hex_to_json
 from app.s3 import upload_base64_image_to_s3
-from app.utils.field_truncate import FieldTruncate
 
 async def process_nft_collections(decode_tx, output_index, timestamp):
     """处理NFT集合信息并更新nft_collections表"""
@@ -62,23 +61,6 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
             logging.error("Error uploading collection icon to S3: %s", str(e))
             # 如果上传失败，保留原始数据
 
-    # 准备集合插入数据
-    collection_data = {
-        'collection_id': collection_id,
-        'collection_name': collection_name,
-        'collection_creator_address': collection_creator_address,
-        'collection_creator_script_hash': collection_creator_script_hash,
-        'collection_symbol': collection_symbol,
-        'collection_attributes': collection_attributes,
-        'collection_description': collection_description,
-        'collection_supply': collection_supply,
-        'collection_create_timestamp': collection_create_timestamp,
-        'collection_icon': collection_icon
-    }
-    
-    # 截断字段
-    collection_data = FieldTruncate.truncate_fields(collection_data)
-    
     # 插入记录到 nft_collections 表
     nft_collection_insert_query = """
     INSERT INTO nft_collections (collection_id, collection_name, collection_creator_address, collection_creator_script_hash, collection_symbol, collection_attributes, collection_description, collection_supply, collection_create_timestamp, collection_icon)
@@ -95,7 +77,7 @@ async def process_nft_collections(decode_tx, output_index, timestamp):
     """
     
     try:
-        await DBManager.execute_update(nft_collection_insert_query, tuple(collection_data.values()))
+        await DBManager.execute_update(nft_collection_insert_query, (collection_id, collection_name, collection_creator_address, collection_creator_script_hash, collection_symbol, collection_attributes, collection_description, collection_supply, collection_create_timestamp, collection_icon))
         return output_index + collection_supply, collection_id, False
     except Exception as e:
         logging.error("Error inserting collection %s: %s", decode_txid, e)

@@ -3,7 +3,7 @@ import time
 import logging
 from app.dependencies import call_node_rpc
 from app.dependencies import DBManager
-from app.utils.utils import hex_to_json, convert_str_to_sha256
+from app.utils import hex_to_json, convert_str_to_sha256
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
