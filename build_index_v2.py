@@ -106,6 +106,36 @@ async def analyze_transaction_data(decode_tx):
     
     return result
 
+
+async def process_single_transaction(tx, block_height, timestamp):
+    success_flags = {"transaction_record": False, "utxos": False}
+    
+    try:
+        decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
+        tx_analysis = await analyze_transaction_data(decode_tx)
+        
+        # 尝试处理交易记录
+        try:
+            await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+            success_flags["transaction_record"] = True
+        except Exception as e:
+            logging.error("处理交易记录失败 %s: %s", tx, str(e))
+        
+        # 无论交易记录是否成功，都尝试处理UTXO
+        try:
+            await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
+            success_flags["utxos"] = True
+        except Exception as e:
+            logging.error("处理UTXO失败 %s: %s", tx, str(e))
+        
+        # 只有两者都成功才算成功
+        return success_flags["transaction_record"] and success_flags["utxos"]
+        
+    except Exception as e:
+        logging.error("处理交易失败 %s: %s", tx, str(e))
+        return False
+
+
 def is_in_blacklist(txid):
     """检查交易ID是否在黑名单中"""
     try:
@@ -266,74 +296,41 @@ async def get_mempool_and_timestamp(if_catch_lastest):
     return current_mempool, timestamp
 
 
-def find_transactions(current_mempool):
+def find_new_transactions(current_mempool):
     """
-    找出新的交易和所有交易
+    找出新的交易
     
     Args:
         current_mempool: 当前内存池
         
     Returns:
-        tuple: (new_txs, all_txs)
-            - new_txs: 只在current_mempool中出现的新交易列表
-            - all_txs: current_mempool和历史mempool的所有不重复交易列表
+        list: 新交易列表
     """
     global mempool
     global last_mempool
     
-    # 转换为集合进行运算
-    current_set = set(current_mempool)
-    history_set = set(mempool + last_mempool)
+    nearly_mempool = mempool + last_mempool
+    new_txs = [tx for tx in current_mempool if tx not in nearly_mempool]
     
-    # 新交易：在current_set中但不在history_set中的交易
-    new_txs = list(current_set - history_set)
-    
-    # 所有交易：current_set和history_set的并集
-    all_txs = list(current_set | history_set)
-    
-    return new_txs, all_txs
+    return new_txs
 
 
-async def process_transactions(new_txs, all_txs, if_catch_lastest, timestamp):
+async def process_transactions(new_txs, if_catch_lastest, timestamp):
     """
-    并行处理新交易和所有交易
+    处理新交易
     
     Args:
-        new_txs: 新交易列表，需要处理UTXO
-        all_txs: 所有交易列表，需要处理交易记录
+        new_txs: 新交易列表
         if_catch_lastest: 是否已追上最新区块
         timestamp: 时间戳
     """
     global mempool
     global index_height
     
-    async def process_transaction_records():
-        # 处理所有交易的交易记录
-        for tx in all_txs:
-            try:
-                decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
-                tx_analysis = await analyze_transaction_data(decode_tx)
-                block_height = index_height if not if_catch_lastest else -1
-                await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
-            except Exception as e:
-                logging.error("处理交易记录失败 %s: %s", tx, str(e))
-    
-    async def process_new_utxos():
-        # 只为新交易处理UTXO
-        for tx in new_txs:
-            mempool.append(tx)
-            try:
-                decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
-                tx_analysis = await analyze_transaction_data(decode_tx)
-                await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
-            except Exception as e:
-                logging.error("处理新交易UTXO失败 %s: %s", tx, str(e))
-    
-    # 并行执行两个任务
-    await asyncio.gather(
-        process_transaction_records(),
-        process_new_utxos()
-    )
+    for tx in new_txs:
+        mempool.append(tx)
+        block_height = index_height if not if_catch_lastest else -1
+        await process_single_transaction(tx, block_height, timestamp)
 
 
 def update_mempool_state(if_catch_lastest):
@@ -365,10 +362,10 @@ async def scan_chain_and_build_index():
         current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
         
         # 找出新交易
-        new_txs, all_txs = find_transactions(current_mempool)
+        new_txs = find_new_transactions(current_mempool)
         
         # 处理新交易
-        await process_transactions(new_txs, all_txs, if_catch_lastest, timestamp)
+        await process_transactions(new_txs, if_catch_lastest, timestamp)
         
         # 更新内存池状态
         update_mempool_state(if_catch_lastest)
