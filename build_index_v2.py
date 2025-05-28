@@ -296,7 +296,7 @@ async def get_mempool_and_timestamp(if_catch_lastest):
     return current_mempool, timestamp
 
 
-def find_new_transactions(current_mempool):
+def find_transactions(current_mempool):
     """
     找出新的交易
     
@@ -312,26 +312,54 @@ def find_new_transactions(current_mempool):
     nearly_mempool = mempool + last_mempool
     new_txs = [tx for tx in current_mempool if tx not in nearly_mempool]
     
-    return new_txs
+    old_txs = [tx for tx in nearly_mempool if tx not in current_mempool]
+    return new_txs, old_txs
 
 
-async def process_transactions(new_txs, if_catch_lastest, timestamp):
+async def process_new_transactions(new_txs, block_height, timestamp):
+    """处理新交易"""
+    try:
+        for tx in new_txs:
+            try:
+                mempool.append(tx)
+                await process_single_transaction(tx, block_height, timestamp)
+            except Exception as e:
+                logging.error("处理新交易失败 %s: %s", tx, str(e))
+                continue
+    except Exception as e:
+        logging.error("处理新交易组失败: %s", str(e))
+
+async def process_old_transactions(old_txs, block_height, timestamp):
+    """处理旧交易"""
+    try:
+        for tx in old_txs:
+            try:
+                decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
+                tx_analysis = await analyze_transaction_data(decode_tx)
+                await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+            except Exception as e:
+                logging.error("处理旧交易失败 %s: %s", tx, str(e))
+                continue
+    except Exception as e:
+        logging.error("处理旧交易组失败: %s", str(e))
+
+async def process_transactions(new_txs, old_txs, if_catch_lastest, timestamp):
     """
-    处理新交易
+    并发处理新交易和旧交易
     
     Args:
         new_txs: 新交易列表
+        old_txs: 旧交易列表
         if_catch_lastest: 是否已追上最新区块
         timestamp: 时间戳
     """
-    global mempool
-    global index_height
+    block_height = index_height if not if_catch_lastest else -1
     
-    for tx in new_txs:
-        mempool.append(tx)
-        block_height = index_height if not if_catch_lastest else -1
-        await process_single_transaction(tx, block_height, timestamp)
-
+    # 并发执行新交易和旧交易的处理
+    await asyncio.gather(
+        process_new_transactions(new_txs, block_height, timestamp),
+        process_old_transactions(old_txs, block_height, timestamp)
+    )
 
 def update_mempool_state(if_catch_lastest):
     """
@@ -362,10 +390,10 @@ async def scan_chain_and_build_index():
         current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
         
         # 找出新交易
-        new_txs = find_new_transactions(current_mempool)
+        new_txs, old_txs = find_transactions(current_mempool)
         
         # 处理新交易
-        await process_transactions(new_txs, if_catch_lastest, timestamp)
+        await process_transactions(new_txs, old_txs, if_catch_lastest, timestamp)
         
         # 更新内存池状态
         update_mempool_state(if_catch_lastest)
