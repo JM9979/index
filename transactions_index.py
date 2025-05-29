@@ -10,8 +10,6 @@ from app.db.ft import process_ft_txo_set, process_ft_balance
 from app.db.ft import process_ft_inputs, process_spent_ft_balances
 from app.db.ft import process_ft_tokens
 from app.db.transaction import process_transaction_record
-from app.db.transaction import get_unconfirmed_transactions
-from app.db.transaction import delete_transactions_below_height
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,11 +30,6 @@ def schedule_task(task):
         # clear db
         clear_db_query = """
         SET FOREIGN_KEY_CHECKS = 0;
-        TRUNCATE TABLE `ft_tokens`;
-        TRUNCATE TABLE `ft_balance`;
-        TRUNCATE TABLE `ft_txo_set`;
-        TRUNCATE TABLE `nft_collections`;
-        TRUNCATE TABLE `nft_utxo_set`;
         TRUNCATE TABLE `transactions`;
         TRUNCATE TABLE `address_transactions`;
         TRUNCATE TABLE `transaction_participants`;
@@ -317,6 +310,34 @@ def find_transactions(current_mempool):
     old_txs = [tx for tx in nearly_mempool if tx not in current_mempool]
     return new_txs, old_txs
 
+
+async def process_new_transactions(new_txs, block_height, timestamp):
+    """处理新交易"""
+    try:
+        for tx in new_txs:
+            try:
+                mempool.append(tx)
+                await process_single_transaction(tx, block_height, timestamp)
+            except Exception as e:
+                logging.error("处理新交易失败 %s: %s", tx, str(e))
+                continue
+    except Exception as e:
+        logging.error("处理新交易组失败: %s", str(e))
+
+async def process_old_transactions(old_txs, block_height, timestamp):
+    """处理旧交易"""
+    try:
+        for tx in old_txs:
+            try:
+                decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
+                tx_analysis = await analyze_transaction_data(decode_tx)
+                await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+            except Exception as e:
+                logging.error("处理旧交易失败 %s: %s", tx, str(e))
+                continue
+    except Exception as e:
+        logging.error("处理旧交易组失败: %s", str(e))
+
 async def process_transactions(new_txs, old_txs, if_catch_lastest, timestamp):
     """
     并发处理新交易和旧交易
@@ -327,34 +348,18 @@ async def process_transactions(new_txs, old_txs, if_catch_lastest, timestamp):
         if_catch_lastest: 是否已追上最新区块
         timestamp: 时间戳
     """
-    # 没有追上最新区块， 捞取unconfirmed transactions 从数据库
-    if not if_catch_lastest:
-        # 删除高度低于当前高度1万区块的交易
-        block_height = index_height
-        await delete_transactions_below_height(block_height)
-        unconfirmed_transactions = await get_unconfirmed_transactions()
-        # process_transaction_record 处理未确认的交易
-        for tx in unconfirmed_transactions:
-            try:
-                decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
-                tx_analysis = await analyze_transaction_data(decode_tx)
-                await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
-            except Exception as e:
-                logging.error("处理未确认的交易记录失败 %s: %s", tx, str(e))
-                continue
-
-
     for tx in new_txs:
-        try:
-            mempool.append(tx)
-            block_height = index_height if not if_catch_lastest else -1
-            await process_single_transaction(tx, block_height, timestamp)
-        except Exception as e:
-            # 如果处理失败，应该把刚才加入的tx从mempool中移除
-            if tx in mempool:
-                mempool.remove(tx)
-            logging.error("处理新交易失败 %s: %s", tx, str(e))
-            continue
+        mempool.append(tx)
+        block_height = index_height if not if_catch_lastest else -1
+        await process_single_transaction(tx, block_height, timestamp)
+    
+    # block_height = index_height if not if_catch_lastest else -1
+    
+    # # 并发执行新交易和旧交易的处理
+    # await asyncio.gather(
+    #     process_new_transactions(new_txs, block_height, timestamp),
+    #     process_old_transactions(old_txs, block_height, timestamp)
+    # )
 
 def update_mempool_state(if_catch_lastest):
     """

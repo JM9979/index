@@ -266,3 +266,63 @@ async def update_transaction_tables(tx_hash, fee, timestamp, utc_time, tx_type, 
             "INSERT INTO transaction_participants (tx_hash, address, role) VALUES (%s, %s, %s)",
             (tx_hash, receiver, "recipient")
         )
+
+# 获取未确认的交易
+async def get_unconfirmed_transactions():
+    """
+    获取未确认的交易
+    """
+    try:
+        unconfirmed_transactions = await DBManager.execute_query("SELECT tx_hash FROM transactions WHERE block_height = -1")
+        return unconfirmed_transactions
+    except Exception as e:
+        logging.error("获取未确认的交易时出错: %s", str(e))
+        return []
+
+# 删除高度低于当前高度1万区块的交易
+# 三张表都要删除
+
+async def delete_transactions_below_height(current_height):
+    """
+    删除低于指定区块高度10000个区块的交易数据
+    
+    手动删除三张相关表的数据：
+    - transactions: 交易基本信息表
+    - address_transactions: 地址交易关系表
+    - transaction_participants: 交易参与方表
+    
+    Args:
+        current_height (int): 当前区块高度
+    """
+    target_height = current_height - 10000
+    
+    try:
+        # 获取需要删除的交易哈希列表
+        query = "SELECT tx_hash FROM transactions WHERE block_height < %s AND block_height != -1"
+        old_transactions = await DBManager.execute_query(query, (target_height,))
+        
+        if not old_transactions:
+            logging.info("没有找到需要删除的旧交易数据（区块高度 < %d）", target_height)
+            return
+            
+        tx_hashes = [tx['tx_hash'] for tx in old_transactions]
+        
+        # 批量删除相关表数据
+        # 1. 删除交易参与方表数据
+        participant_delete = "DELETE FROM transaction_participants WHERE tx_hash IN %s"
+        await DBManager.execute_update(participant_delete, (tuple(tx_hashes),))
+        
+        # 2. 删除地址交易关系表数据
+        addr_tx_delete = "DELETE FROM address_transactions WHERE tx_hash IN %s"
+        await DBManager.execute_update(addr_tx_delete, (tuple(tx_hashes),))
+        
+        # 3. 删除交易基本信息表数据
+        tx_delete = "DELETE FROM transactions WHERE tx_hash IN %s"
+        await DBManager.execute_update(tx_delete, (tuple(tx_hashes),))
+        
+        logging.info("已删除区块高度 %d 以下的交易数据，共处理 %d 笔交易", 
+                    target_height, len(tx_hashes))
+        
+    except Exception as e:
+        logging.error("删除旧交易数据时出错: %s", str(e))
+        raise
