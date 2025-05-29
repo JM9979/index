@@ -353,13 +353,18 @@ async def process_transactions(new_txs, old_txs, if_catch_lastest, timestamp):
         if_catch_lastest: 是否已追上最新区块
         timestamp: 时间戳
     """
-    block_height = index_height if not if_catch_lastest else -1
+    for tx in new_txs:
+        mempool.append(tx)
+        block_height = index_height if not if_catch_lastest else -1
+        await process_single_transaction(tx, block_height, timestamp)
     
-    # 并发执行新交易和旧交易的处理
-    await asyncio.gather(
-        process_new_transactions(new_txs, block_height, timestamp),
-        process_old_transactions(old_txs, block_height, timestamp)
-    )
+    # block_height = index_height if not if_catch_lastest else -1
+    
+    # # 并发执行新交易和旧交易的处理
+    # await asyncio.gather(
+    #     process_new_transactions(new_txs, block_height, timestamp),
+    #     process_old_transactions(old_txs, block_height, timestamp)
+    # )
 
 def update_mempool_state(if_catch_lastest):
     """
