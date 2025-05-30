@@ -9,9 +9,6 @@ from app.db.nft_utxo_set import process_nft_utxo_set
 from app.db.ft import process_ft_txo_set, process_ft_balance
 from app.db.ft import process_ft_inputs, process_spent_ft_balances
 from app.db.ft import process_ft_tokens
-from app.db.transaction import process_transaction_record
-from app.db.transaction import get_unconfirmed_transactions
-from app.db.transaction import delete_transactions_below_height
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,9 +34,6 @@ def schedule_task(task):
         TRUNCATE TABLE `ft_txo_set`;
         TRUNCATE TABLE `nft_collections`;
         TRUNCATE TABLE `nft_utxo_set`;
-        TRUNCATE TABLE `transactions`;
-        TRUNCATE TABLE `address_transactions`;
-        TRUNCATE TABLE `transaction_participants`;
         SET FOREIGN_KEY_CHECKS = 1;
         """
         await DBManager.execute_update(clear_db_query)
@@ -109,19 +103,12 @@ async def analyze_transaction_data(decode_tx):
     return result
 
 
-async def process_single_transaction(tx, block_height, timestamp):
-    success_flags = {"transaction_record": False, "utxos": False}
+async def process_single_transaction(tx, timestamp):
+    success_flags = {"utxos": False}
     
     try:
         decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
         tx_analysis = await analyze_transaction_data(decode_tx)
-        
-        # 尝试处理交易记录
-        try:
-            await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
-            success_flags["transaction_record"] = True
-        except Exception as e:
-            logging.error("处理交易记录失败 %s: %s", tx, str(e))
         
         # 无论交易记录是否成功，都尝试处理UTXO
         try:
@@ -130,8 +117,7 @@ async def process_single_transaction(tx, block_height, timestamp):
         except Exception as e:
             logging.error("处理UTXO失败 %s: %s", tx, str(e))
         
-        # 只有两者都成功才算成功
-        return success_flags["transaction_record"] and success_flags["utxos"]
+        return success_flags["utxos"]
         
     except Exception as e:
         logging.error("处理交易失败 %s: %s", tx, str(e))
@@ -298,7 +284,7 @@ async def get_mempool_and_timestamp(if_catch_lastest):
     return current_mempool, timestamp
 
 
-def find_transactions(current_mempool):
+def find_new_transactions(current_mempool):
     """
     找出新的交易
     
@@ -314,45 +300,22 @@ def find_transactions(current_mempool):
     nearly_mempool = mempool + last_mempool
     new_txs = [tx for tx in current_mempool if tx not in nearly_mempool]
     
-    old_txs = [tx for tx in nearly_mempool if tx not in current_mempool]
-    return new_txs, old_txs
+    return new_txs
 
-async def process_transactions(new_txs, old_txs, if_catch_lastest, timestamp):
+async def process_transactions(new_txs, if_catch_lastest, timestamp):
     """
     并发处理新交易和旧交易
     
     Args:
         new_txs: 新交易列表
-        old_txs: 旧交易列表
         if_catch_lastest: 是否已追上最新区块
         timestamp: 时间戳
     """
-    # 没有追上最新区块， 捞取unconfirmed transactions 从数据库
-    if not if_catch_lastest:
-        # 删除高度低于当前高度1万区块的交易
-        # block_height = index_height
-        # await delete_transactions_below_height(block_height)
-        unconfirmed_transactions = await get_unconfirmed_transactions()
-        # process_transaction_record 处理未确认的交易
-        for tx in unconfirmed_transactions:
-            try:
-                decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
-                tx_analysis = await analyze_transaction_data(decode_tx)
-                await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
-            except Exception as e:
-                logging.error("处理未确认的交易记录失败 %s: %s", tx, str(e))
-                continue
-
-
     for tx in new_txs:
         try:
             mempool.append(tx)
-            block_height = index_height if not if_catch_lastest else -1
-            await process_single_transaction(tx, block_height, timestamp)
+            await process_single_transaction(tx, timestamp)
         except Exception as e:
-            # 如果处理失败，应该把刚才加入的tx从mempool中移除
-            if tx in mempool:
-                mempool.remove(tx)
             logging.error("处理新交易失败 %s: %s", tx, str(e))
             continue
 
@@ -385,10 +348,10 @@ async def scan_chain_and_build_index():
         current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
         
         # 找出新交易
-        new_txs, old_txs = find_transactions(current_mempool)
+        new_txs = find_new_transactions(current_mempool)
         
         # 处理新交易
-        await process_transactions(new_txs, old_txs, if_catch_lastest, timestamp)
+        await process_transactions(new_txs, if_catch_lastest, timestamp)
         
         # 更新内存池状态
         update_mempool_state(if_catch_lastest)
