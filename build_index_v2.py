@@ -330,8 +330,8 @@ async def process_transactions(new_txs, old_txs, if_catch_lastest, timestamp):
     # 没有追上最新区块， 捞取unconfirmed transactions 从数据库
     if not if_catch_lastest:
         # 删除高度低于当前高度1万区块的交易
-        block_height = index_height
-        await delete_transactions_below_height(block_height)
+        # block_height = index_height
+        # await delete_transactions_below_height(block_height)
         unconfirmed_transactions = await get_unconfirmed_transactions()
         # process_transaction_record 处理未确认的交易
         for tx in unconfirmed_transactions:

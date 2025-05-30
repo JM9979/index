@@ -305,8 +305,13 @@ async def delete_transactions_below_height(current_height):
             logging.info("没有找到需要删除的旧交易数据（区块高度 < %d）", target_height)
             return
             
-        tx_hashes = [tx['tx_hash'] for tx in old_transactions]
+        # 从查询结果中提取交易哈希（处理元组格式）
+        tx_hashes = [tx[0] for tx in old_transactions]  # 使用索引0访问元组的第一个元素
         
+        if not tx_hashes:  # 额外的安全检查
+            logging.info("没有找到需要删除的旧交易数据（区块高度 < %d）", target_height)
+            return
+            
         # 批量删除相关表数据
         # 1. 删除交易参与方表数据
         participant_delete = "DELETE FROM transaction_participants WHERE tx_hash IN %s"
