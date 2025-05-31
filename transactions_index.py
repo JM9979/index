@@ -9,15 +9,34 @@ from app.db.nft_utxo_set import process_nft_utxo_set
 from app.db.ft import process_ft_txo_set, process_ft_balance
 from app.db.ft import process_ft_inputs, process_spent_ft_balances
 from app.db.ft import process_ft_tokens
+from app.db.transaction_history import process_transaction_record
+from app.db.transaction_history import get_unconfirmed_transactions
+from app.db.transaction_history import delete_transactions_below_height
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 定义并初始化全局变量
-index_height = 862600
+index_height = 0  # 将在初始化时设置
 index_interval = 0
 mempool = []
 last_mempool = []
+
+async def get_initial_block_height():
+    """
+    获取初始区块高度，设置为当前区块高度减去10000
+    
+    Returns:
+        int: 初始区块高度
+    """
+    try:
+        current_height = await syclic_call_rpc(method="getblockcount", params=[])
+        initial_height = max(0, current_height - 10000)
+        logging.info(f"当前区块高度: {current_height}, 设置初始扫描高度: {initial_height}")
+        return initial_height
+    except Exception as e:
+        logging.error(f"获取初始区块高度失败: {str(e)}")
+        raise
 
 def schedule_task(task):
     """
@@ -29,14 +48,17 @@ def schedule_task(task):
         # clear db
         clear_db_query = """
         SET FOREIGN_KEY_CHECKS = 0;
-        TRUNCATE TABLE `ft_tokens`;
-        TRUNCATE TABLE `ft_balance`;
-        TRUNCATE TABLE `ft_txo_set`;
-        TRUNCATE TABLE `nft_collections`;
-        TRUNCATE TABLE `nft_utxo_set`;
+        TRUNCATE TABLE `transactions`;
+        TRUNCATE TABLE `address_transactions`;
+        TRUNCATE TABLE `transaction_participants`;
         SET FOREIGN_KEY_CHECKS = 1;
         """
         await DBManager.execute_update(clear_db_query)
+
+        # 设置初始区块高度
+        global index_height
+        index_height = await get_initial_block_height()
+        logging.info(f"开始从区块高度 {index_height} 扫描交易记录")
 
         while True:
             try:
@@ -103,21 +125,21 @@ async def analyze_transaction_data(decode_tx):
     return result
 
 
-async def process_single_transaction(tx, timestamp):
-    success_flags = {"utxos": False}
+async def process_single_transaction(tx, block_height, timestamp):
+    success_flags = {"transaction_record": False}
     
     try:
         decode_tx = await syclic_call_rpc(method="getrawtransaction", params=[tx, 1])
         tx_analysis = await analyze_transaction_data(decode_tx)
         
-        # 无论交易记录是否成功，都尝试处理UTXO
+        # 尝试处理交易记录
         try:
-            await process_tx_utxos(decode_tx, timestamp, tx_analysis['utxo_types'])
-            success_flags["utxos"] = True
+            await process_transaction_record(decode_tx, block_height, timestamp, tx_analysis['tx_type'])
+            success_flags["transaction_record"] = True
         except Exception as e:
-            logging.error("处理UTXO失败 %s: %s", tx, str(e))
+            logging.error("处理交易记录失败 %s: %s", tx, str(e))
         
-        return success_flags["utxos"]
+        return success_flags["transaction_record"]
         
     except Exception as e:
         logging.error("处理交易失败 %s: %s", tx, str(e))
@@ -254,9 +276,15 @@ async def check_block_height():
     if block_count_res < index_height:
         if_catch_lastest = True
         index_interval = 2
+    elif block_count_res - index_height > 100:
+        # 如果差距较大，加快扫描速度
+        index_interval = 0.1
+    else:
+        # 接近最新区块时，降低扫描速度
+        index_interval = 1
     
-    logging.info("扫描区块链... 当前索引高度: %s, 区块链高度: %s, 是否追上最新: %s", 
-                 index_height, block_count_res, if_catch_lastest)
+    logging.info("扫描区块链... 当前索引高度: %s, 区块链高度: %s, 是否追上最新: %s, 扫描间隔: %s秒", 
+                 index_height, block_count_res, if_catch_lastest, index_interval)
     
     return if_catch_lastest, block_count_res
 
@@ -284,7 +312,7 @@ async def get_mempool_and_timestamp(if_catch_lastest):
     return current_mempool, timestamp
 
 
-def find_new_transactions(current_mempool):
+def find_transactions(current_mempool):
     """
     找出新的交易
     
@@ -300,24 +328,38 @@ def find_new_transactions(current_mempool):
     nearly_mempool = mempool + last_mempool
     new_txs = [tx for tx in current_mempool if tx not in nearly_mempool]
     
-    return new_txs
+    return new_txs, current_mempool
 
-async def process_transactions(new_txs, if_catch_lastest, timestamp):
+async def process_transactions(new_txs, current_mempool, if_catch_lastest, timestamp):
     """
-    并发处理新交易和旧交易
+    并发处理新交易
     
     Args:
         new_txs: 新交易列表
         if_catch_lastest: 是否已追上最新区块
         timestamp: 时间戳
     """
-    for tx in new_txs:
-        try:
-            mempool.append(tx)
-            await process_single_transaction(tx, timestamp)
-        except Exception as e:
-            logging.error("处理新交易失败 %s: %s", tx, str(e))
-            continue
+    # 删除掉一万块以前的交易
+    if not if_catch_lastest and index_height > 10000:
+        await delete_transactions_below_height(index_height)
+
+    # 创建信号量来限制并发数量
+    semaphore = asyncio.Semaphore(50)  # 限制最大并发数为50
+
+    async def process_single_tx(tx):
+        async with semaphore:
+            try:
+                mempool.append(tx)
+                block_height = index_height if not if_catch_lastest else -1
+                await process_single_transaction(tx, block_height, timestamp)
+            except Exception as e:
+                logging.error("处理新交易失败 %s: %s", tx, str(e))
+
+    # 创建所有交易的任务
+    tasks = [process_single_tx(tx) for tx in current_mempool]
+    
+    # 并发执行所有任务
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 def update_mempool_state(if_catch_lastest):
     """
@@ -342,16 +384,18 @@ async def scan_chain_and_build_index():
     """
     try:
         # 检查区块高度并确定是否为最新区块
-        if_catch_lastest, _ = await check_block_height()
+        if_catch_lastest, block_count_res = await check_block_height()
         
         # 获取当前内存池和时间戳
         current_mempool, timestamp = await get_mempool_and_timestamp(if_catch_lastest)
         
+        # 如果不是最新区块（即有新区块），处理之前未确认的交易
+        
         # 找出新交易
-        new_txs = find_new_transactions(current_mempool)
+        new_txs, current_mempool = find_transactions(current_mempool)
         
         # 处理新交易
-        await process_transactions(new_txs, if_catch_lastest, timestamp)
+        await process_transactions(new_txs, current_mempool, if_catch_lastest, timestamp)
         
         # 更新内存池状态
         update_mempool_state(if_catch_lastest)

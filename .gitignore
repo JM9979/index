@@ -10,3 +10,4 @@ origin.log
 *.out
 /app/db/__pycache__
 logs/*
+/app/utils/__pycache__

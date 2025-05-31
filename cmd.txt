@@ -5,6 +5,7 @@ python3 build_index_v2.py > v00004.log 2>&1
 # 激活虚拟环境并后台运行
 source venv/bin/activate
 nohup python build_index_v2.py > indexer.log 2>&1 &
+nohup python transactions_index.py > history_indexer.log 2>&1 &
 
 # 查看日志
 tail -f indexer.log
